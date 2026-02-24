@@ -1,0 +1,279 @@
+diff --git a/envknob/featureknob/featureknob.go b/envknob/featureknob/featureknob.go
+index 5a54a1c..ca5fb2a 100644
+--- a/envknob/featureknob/featureknob.go
++++ b/envknob/featureknob/featureknob.go
+@@ -31,7 +31,7 @@ func CanRunTailscaleSSH() error {
+ 		if version.IsSandboxedMacOS() {
+ 			return errors.New("The Tailscale SSH server does not run in sandboxed Tailscale GUI builds.")
+ 		}
+-	case "freebsd", "openbsd", "plan9":
++	case "android", "freebsd", "openbsd", "plan9":
+ 	default:
+ 		return errors.New("The Tailscale SSH server is not supported on " + runtime.GOOS)
+ 	}
+diff --git a/feature/taildrop/fileops_fs.go b/feature/taildrop/fileops_fs.go
+index 4fecbe4..91997d7 100644
+--- a/feature/taildrop/fileops_fs.go
++++ b/feature/taildrop/fileops_fs.go
+@@ -1,6 +1,6 @@
+ // Copyright (c) Tailscale Inc & AUTHORS
+ // SPDX-License-Identifier: BSD-3-Clause
+-//go:build !android
++//go:build !ts_omit_taildrop
+ 
+ package taildrop
+ 
+diff --git a/ipn/ipnlocal/ssh.go b/ipn/ipnlocal/ssh.go
+index e2c2f50..52f5cf5 100644
+--- a/ipn/ipnlocal/ssh.go
++++ b/ipn/ipnlocal/ssh.go
+@@ -1,7 +1,7 @@
+ // Copyright (c) Tailscale Inc & AUTHORS
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
+-//go:build ((linux && !android) || (darwin && !ios) || freebsd || openbsd || plan9) && !ts_omit_ssh
++//go:build (linux || (darwin && !ios) || freebsd || openbsd || plan9) && !ts_omit_ssh
+ 
+ package ipnlocal
+ 
+diff --git a/ipn/ipnlocal/ssh_stub.go b/ipn/ipnlocal/ssh_stub.go
+index 6b2e360..2647100 100644
+--- a/ipn/ipnlocal/ssh_stub.go
++++ b/ipn/ipnlocal/ssh_stub.go
+@@ -1,7 +1,7 @@
+ // Copyright (c) Tailscale Inc & AUTHORS
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
+-//go:build ts_omit_ssh || ios || android || (!linux && !darwin && !freebsd && !openbsd && !plan9)
++//go:build ts_omit_ssh || ios || (!linux && !android && !darwin && !freebsd && !openbsd && !plan9)
+ 
+ package ipnlocal
+ 
+diff --git a/net/netmon/state.go b/net/netmon/state.go
+index 79dd8a0..c6a153b 100644
+--- a/net/netmon/state.go
++++ b/net/netmon/state.go
+@@ -9,6 +9,7 @@
+ 	"net"
+ 	"net/http"
+ 	"net/netip"
++	"os/exec"
+ 	"runtime"
+ 	"slices"
+ 	"sort"
+@@ -755,7 +756,7 @@ func netInterfaces() ([]Interface, error) {
+ 	}
+ 	ifs, err := net.Interfaces()
+ 	if err != nil {
+-		return nil, err
++		return netInterfacesFallback()
+ 	}
+ 	ret := make([]Interface, len(ifs))
+ 	for i := range ifs {
+@@ -764,6 +765,141 @@ func netInterfaces() ([]Interface, error) {
+ 	return ret, nil
+ }
+ 
++// netInterfacesFallback parses ifconfig output to get interface info
++// when net.Interfaces() fails (e.g., on Android/PRoot where netlink is blocked).
++func netInterfacesFallback() ([]Interface, error) {
++	cmd := exec.Command("ifconfig")
++	out, err := cmd.Output()
++	if err != nil {
++		return []Interface{}, nil
++	}
++	return parseIfconfigOutput(string(out))
++}
++
++func parseIfconfigOutput(output string) ([]Interface, error) {
++	var ret []Interface
++	blocks := strings.Split(output, "\n\n")
++	idx := 1
++	for _, block := range blocks {
++		block = strings.TrimSpace(block)
++		if block == "" {
++			continue
++		}
++		lines := strings.Split(block, "\n")
++		firstLine := lines[0]
++
++		colonIdx := strings.Index(firstLine, ":")
++		if colonIdx == -1 {
++			continue
++		}
++		name := strings.TrimSpace(firstLine[:colonIdx])
++
++		var flags net.Flags
++		mtu := 0
++
++		if flagStart := strings.Index(firstLine, "flags="); flagStart != -1 {
++			rest := firstLine[flagStart+6:]
++			if ltIdx := strings.Index(rest, "<"); ltIdx != -1 {
++				if gtIdx := strings.Index(rest, ">"); gtIdx != -1 {
++					flagStr := rest[ltIdx+1 : gtIdx]
++					for _, f := range strings.Split(flagStr, ",") {
++						switch f {
++						case "UP":
++							flags |= net.FlagUp
++						case "BROADCAST":
++							flags |= net.FlagBroadcast
++						case "LOOPBACK":
++							flags |= net.FlagLoopback
++						case "POINTOPOINT":
++							flags |= net.FlagPointToPoint
++						case "MULTICAST":
++							flags |= net.FlagMulticast
++						case "RUNNING":
++							flags |= net.FlagRunning
++						}
++					}
++				}
++			}
++			if mtuIdx := strings.Index(firstLine, "mtu "); mtuIdx != -1 {
++				fmt.Sscanf(firstLine[mtuIdx+4:], "%d", &mtu)
++			}
++		}
++
++		iface := &net.Interface{
++			Index: idx,
++			MTU:   mtu,
++			Name:  name,
++			Flags: flags,
++		}
++		idx++
++
++		var altAddrs []net.Addr
++		for _, line := range lines[1:] {
++			line = strings.TrimSpace(line)
++			if strings.HasPrefix(line, "inet ") {
++				fields := strings.Fields(line)
++				if len(fields) >= 2 {
++					ipStr := fields[1]
++					maskStr := ""
++					for i, f := range fields {
++						if f == "netmask" && i+1 < len(fields) {
++							maskStr = fields[i+1]
++						}
++					}
++					ip := net.ParseIP(ipStr)
++					if ip != nil {
++						mask := net.CIDRMask(32, 32)
++						if maskStr != "" {
++							if parsedMask := net.ParseIP(maskStr); parsedMask != nil {
++								mask = net.IPMask(parsedMask.To4())
++							}
++						}
++						altAddrs = append(altAddrs, &net.IPNet{IP: ip, Mask: mask})
++					}
++				}
++			} else if strings.HasPrefix(line, "inet6 ") {
++				fields := strings.Fields(line)
++				if len(fields) >= 2 {
++					cidr := fields[1]
++					if strings.Contains(cidr, "/") {
++						_, ipNet, err := net.ParseCIDR(cidr)
++						if err == nil {
++							ip := net.ParseIP(strings.Split(cidr, "/")[0])
++							if ip != nil {
++								ipNet.IP = ip
++							}
++							altAddrs = append(altAddrs, ipNet)
++						}
++					} else {
++						prefixLen := 0
++						for i, f := range fields {
++							if f == "prefixlen" && i+1 < len(fields) {
++								fmt.Sscanf(fields[i+1], "%d", &prefixLen)
++							}
++						}
++						ip := net.ParseIP(cidr)
++						if ip != nil {
++							if prefixLen == 0 {
++								prefixLen = 128
++							}
++							altAddrs = append(altAddrs, &net.IPNet{IP: ip, Mask: net.CIDRMask(prefixLen, 128)})
++						}
++					}
++				}
++			}
++		}
++
++		ni := Interface{Interface: iface}
++		if len(altAddrs) > 0 {
++			ni.AltAddrs = altAddrs
++		} else {
++			ni.AltAddrs = []net.Addr{}
++		}
++		ret = append(ret, ni)
++	}
++	return ret, nil
++}
++
+ // DefaultRouteDetails are the details about a default route returned
+ // by DefaultRoute.
+ type DefaultRouteDetails struct {
+diff --git a/ssh/tailssh/auditd_linux.go b/ssh/tailssh/auditd_linux.go
+index e9f551d..57ab5ae 100644
+--- a/ssh/tailssh/auditd_linux.go
++++ b/ssh/tailssh/auditd_linux.go
+@@ -1,7 +1,7 @@
+ // Copyright (c) Tailscale Inc & AUTHORS
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
+-//go:build linux && !android
++//go:build linux
+ 
+ package tailssh
+ 
+diff --git a/ssh/tailssh/incubator.go b/ssh/tailssh/incubator.go
+index f756467..e1b5ef3 100644
+--- a/ssh/tailssh/incubator.go
++++ b/ssh/tailssh/incubator.go
+@@ -7,7 +7,7 @@
+ // and groups to the specified `--uid`, `--gid` and `--groups`, and
+ // then launches the requested `--cmd`.
+ 
+-//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd
++//go:build linux || (darwin && !ios) || freebsd || openbsd
+ 
+ package tailssh
+ 
+diff --git a/ssh/tailssh/incubator_linux.go b/ssh/tailssh/incubator_linux.go
+index 4dfb9f2..bcbe0e2 100644
+--- a/ssh/tailssh/incubator_linux.go
++++ b/ssh/tailssh/incubator_linux.go
+@@ -1,7 +1,7 @@
+ // Copyright (c) Tailscale Inc & AUTHORS
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
+-//go:build linux && !android
++//go:build linux
+ 
+ package tailssh
+ 
+diff --git a/ssh/tailssh/tailssh.go b/ssh/tailssh/tailssh.go
+index 91e1779..2738cde 100644
+--- a/ssh/tailssh/tailssh.go
++++ b/ssh/tailssh/tailssh.go
+@@ -1,7 +1,7 @@
+ // Copyright (c) Tailscale Inc & AUTHORS
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
+-//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd || plan9
++//go:build linux || (darwin && !ios) || freebsd || openbsd || plan9
+ 
+ // Package tailssh is an SSH server integrated into Tailscale.
+ package tailssh
+diff --git a/ssh/tailssh/user.go b/ssh/tailssh/user.go
+index ac92c76..097f0d2 100644
+--- a/ssh/tailssh/user.go
++++ b/ssh/tailssh/user.go
+@@ -1,7 +1,7 @@
+ // Copyright (c) Tailscale Inc & AUTHORS
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
+-//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd || plan9
++//go:build linux || (darwin && !ios) || freebsd || openbsd || plan9
+ 
+ package tailssh
+ 
