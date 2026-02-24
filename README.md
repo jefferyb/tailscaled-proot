@@ -26,19 +26,18 @@ This repo contains a patched build of `tailscaled` that:
 ### Option A: Use the Pre-built Binary
 
 ```bash
-# Install
+# Install (binary + auto-start in ~/.bashrc)
 ./install.sh
 
-# Start the daemon
-start-tailscaled &
-
-# Connect to your network
+# Connect to your network (only needed once)
 tailscale up \
   --login-server https://headscale.example.com:443 \
   --ssh \
   --hostname my-device \
   --authkey "YOUR_AUTHKEY"
 ```
+
+After install, `tailscaled` starts automatically every time you open a PRoot-Distro shell. No manual steps needed.
 
 ### Option B: Build from Source
 
@@ -53,8 +52,7 @@ export PATH=/usr/local/go/bin:$PATH
 # Build and install
 ./install.sh --build
 
-# Start and connect
-start-tailscaled &
+# Connect to your network (only needed once)
 tailscale up \
   --login-server https://headscale.example.com:443 \
   --ssh \
@@ -95,8 +93,20 @@ After running `install.sh`:
 | Path | Description |
 |------|-------------|
 | `/usr/sbin/tailscaled` | Patched tailscaled binary |
-| `/usr/local/bin/start-tailscaled` | Startup script (userspace-networking mode) |
+| `/usr/local/bin/start-tailscaled` | Manual startup script (userspace-networking mode) |
 | `/etc/systemd/system/tailscaled-proot.service` | Systemd unit (for environments where systemd is PID 1) |
+| `~/.bashrc` (appended) | Auto-start snippet that launches tailscaled on login |
+
+## Auto-Start Behavior
+
+PRoot-Distro does not support systemd (it requires PID 1 + real root). Instead, the installer appends a snippet to `~/.bashrc` that:
+
+- Checks if `tailscaled` is already running (via `pgrep`)
+- If not running: cleans any stale socket, starts the daemon in the background, waits for it to be ready
+- If already running: does nothing (no duplicate processes)
+- Runs silently with no terminal output
+
+**Note:** PRoot kills background processes when you exit the last session. `tailscaled` will automatically restart on your next login.
 
 ## Notes
 

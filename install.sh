@@ -81,14 +81,43 @@ UNIT
 # --- Create required directories ---
 mkdir -p /var/run/tailscale /var/lib/tailscale
 
+# --- Add auto-start to ~/.bashrc ---
+BASHRC="${HOME}/.bashrc"
+MARKER="# Auto-start tailscaled if not already running"
+if [ -f "$BASHRC" ] && ! grep -qF "$MARKER" "$BASHRC"; then
+    echo "Adding tailscaled auto-start to $BASHRC..."
+    cat >> "$BASHRC" << 'BASHRC_SNIPPET'
+
+# Auto-start tailscaled if not already running
+if command -v tailscaled &>/dev/null && ! pgrep -x tailscaled &>/dev/null; then
+    mkdir -p /var/run/tailscale /var/lib/tailscale
+    rm -f /var/run/tailscale/tailscaled.sock
+    tailscaled \
+        --state=/var/lib/tailscale/tailscaled.state \
+        --socket=/var/run/tailscale/tailscaled.sock \
+        --tun=userspace-networking \
+        --port=41641 &>/dev/null &
+    disown $!
+    for _ in 1 2 3 4 5; do
+        [ -S /var/run/tailscale/tailscaled.sock ] && break
+        sleep 1
+    done
+fi
+BASHRC_SNIPPET
+else
+    echo "Auto-start already present in $BASHRC, skipping."
+fi
+
 echo ""
 echo "Installed:"
-echo "  /usr/sbin/tailscaled          (patched binary)"
-echo "  /usr/local/bin/start-tailscaled (startup script)"
+echo "  /usr/sbin/tailscaled              (patched binary)"
+echo "  /usr/local/bin/start-tailscaled   (manual startup script)"
 echo "  /etc/systemd/system/tailscaled-proot.service"
+echo "  ~/.bashrc                         (auto-start on login)"
 echo ""
-echo "Quick start:"
-echo "  start-tailscaled &"
+echo "tailscaled will now start automatically on every interactive shell login."
+echo ""
+echo "To connect for the first time:"
 echo "  tailscale up --login-server https://YOUR_HEADSCALE:443 --ssh --hostname YOUR_HOST --authkey YOUR_KEY"
 echo ""
 tailscaled --version
