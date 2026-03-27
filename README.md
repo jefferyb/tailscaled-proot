@@ -4,6 +4,12 @@ Run Tailscale (with SSH server + Taildrop) inside PRoot-Distro on Android withou
 
 The stock `tailscaled` crashes in PRoot because Android blocks netlink sockets. This project provides patched binaries that work around that, built automatically for every new Tailscale release.
 
+## Prerequisites
+
+- [Termux](https://termux.dev/) with [PRoot-Distro](https://github.com/termux/proot-distro) installed (Debian, Ubuntu, etc.)
+- `curl` and `net-tools` inside PRoot (`apt install -y curl net-tools`)
+- No root required
+
 ## Quick Start
 
 ```bash
@@ -13,13 +19,20 @@ curl -fsSL https://raw.githubusercontent.com/jefferyb/tailscaled-proot/main/tail
 
 # Install (downloads both tailscale CLI + patched daemon, sets up auto-start)
 tailscaled-proot install
+```
 
-# Connect to your network (only needed once)
+Then connect to your network (only needed once):
+
+```bash
+# If using Headscale (self-hosted):
 tailscale up \
   --login-server https://headscale.example.com:443 \
   --ssh \
   --hostname my-device \
   --authkey "YOUR_AUTHKEY"
+
+# If using official Tailscale:
+tailscale up --ssh --hostname my-device
 ```
 
 That's it. The daemon starts automatically every time you open a PRoot-Distro shell.

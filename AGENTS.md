@@ -79,11 +79,14 @@ PRoot-Distro does not support systemd. The daemon auto-starts via a snippet in `
 |------|---------|
 | `tailscaled-proot` | User-facing CLI tool (install/update/status/uninstall) |
 | `tailscale-proot-distro.patch` | Git patch against tailscale source tree |
-| `build-tailscaled.sh` | Build script for local/CI builds |
-| `install.sh` | Legacy installer (installs from pre-built binary in repo) |
+| `build-tailscaled.sh` | Build script for local/CI builds (supports `--goarch` for multi-arch) |
 | `README.md` | User-facing documentation |
-| `LICENSE` | Tailscale's BSD-3-Clause license |
+| `AGENTS.md` | This file -- agent instructions and institutional knowledge |
+| `LICENSE` | Tailscale's BSD-3-Clause license (required for redistribution) |
+| `.gitignore` | Ignores built binaries (they go in GitHub Releases, not the repo) |
 | `.github/workflows/` | CI workflows for automated builds |
+
+**Note:** Binaries are NOT committed to the repo. They are distributed via GitHub Releases.
 
 ## Common Tasks
 

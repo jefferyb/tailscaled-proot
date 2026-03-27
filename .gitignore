@@ -1,0 +1,11 @@
+# Built binaries (distributed via GitHub Releases, not committed to repo)
+tailscaled
+tailscale
+tailscaled-*
+tailscale-*
+!tailscaled-proot
+!tailscale-proot-distro.patch
+
+# Build artifacts
+/tmp/tailscale-proot-build/
+*.tar.gz
