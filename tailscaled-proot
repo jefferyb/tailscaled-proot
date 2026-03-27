@@ -20,9 +20,11 @@
 set -euo pipefail
 
 GITHUB_REPO="jefferyb/tailscaled-proot"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 SCRIPT_URL="https://raw.githubusercontent.com/$GITHUB_REPO/main/tailscaled-proot"
-INSTALL_DIR="/usr/local/bin"
+CLI_DIR="/usr/bin"
+DAEMON_DIR="/usr/sbin"
+SCRIPT_DIR="/usr/local/bin"
 STATE_DIR="/var/lib/tailscale"
 SOCKET_DIR="/var/run/tailscale"
 SOCKET="$SOCKET_DIR/tailscaled.sock"
@@ -31,12 +33,23 @@ BASHRC_MARKER="# --- tailscaled-proot auto-start ---"
 BASHRC_END_MARKER="# --- end tailscaled-proot ---"
 LEGACY_BASHRC_MARKER="# Auto-start tailscaled if not already running"
 
+# Temp directory for downloads (cleaned up on exit)
+_TMPDIR=""
+_cleanup() { [ -n "$_TMPDIR" ] && rm -rf "$_TMPDIR" || true; }
+trap _cleanup EXIT
+
 # --- Output helpers ---
 info()  { echo -e "  \033[1;34m→\033[0m $*"; }
 ok()    { echo -e "  \033[1;32m✓\033[0m $*"; }
 warn()  { echo -e "  \033[1;33m!\033[0m $*"; }
 err()   { echo -e "  \033[1;31m✗\033[0m $*" >&2; }
 step()  { echo -e "\n\033[1m[$1/$TOTAL_STEPS]\033[0m $2"; }
+
+# --- Process helpers ---
+# PRoot reports full paths as process names, so pgrep -x fails.
+# Use plain pgrep/pkill (substring match) instead.
+daemon_pid() { pgrep tailscaled 2>/dev/null | head -1; }
+daemon_running() { pgrep tailscaled &>/dev/null; }
 
 # --- Preflight checks ---
 check_requirements() {
@@ -56,12 +69,12 @@ self_update() {
     local remote_version
     remote_version=$(get_remote_script_version 2>/dev/null) || {
         warn "Could not check for script updates"
-        return 1
+        return 0
     }
 
     if [ -z "$remote_version" ]; then
         warn "Could not determine remote script version"
-        return 1
+        return 0
     fi
 
     if [ "$SCRIPT_VERSION" = "$remote_version" ]; then
@@ -74,7 +87,7 @@ self_update() {
     tmp_script=$(mktemp)
     if curl -fsSL -o "$tmp_script" "$SCRIPT_URL" 2>/dev/null; then
         local script_path
-        script_path=$(realpath "$0" 2>/dev/null || echo "$INSTALL_DIR/tailscaled-proot")
+        script_path=$(realpath "$0" 2>/dev/null || echo "$SCRIPT_DIR/tailscaled-proot")
         cp "$tmp_script" "$script_path"
         chmod +x "$script_path"
         rm -f "$tmp_script"
@@ -83,19 +96,8 @@ self_update() {
     else
         rm -f "$tmp_script"
         warn "Failed to download script update"
-        return 1
-    fi
-}
-
-check_script_update_available() {
-    local remote_version
-    remote_version=$(get_remote_script_version 2>/dev/null) || return 1
-    if [ -n "$remote_version" ] && [ "$SCRIPT_VERSION" != "$remote_version" ]; then
-        warn "Script update available: $SCRIPT_VERSION → $remote_version"
-        info "Run: tailscaled-proot update"
         return 0
     fi
-    return 1
 }
 
 # --- GitHub API helpers ---
@@ -103,7 +105,6 @@ fetch_release() {
     local tag="${1:-}"
     local url
     if [ -n "$tag" ]; then
-        # Normalize: accept both "v1.96.2" and "1.96.2"
         [[ "$tag" == v* ]] || tag="v$tag"
         url="https://api.github.com/repos/$GITHUB_REPO/releases/tags/$tag"
     else
@@ -150,16 +151,16 @@ get_download_url() {
 
 # --- Version helpers ---
 installed_cli_version() {
-    if [ -x "$INSTALL_DIR/tailscale" ]; then
-        "$INSTALL_DIR/tailscale" version 2>/dev/null | head -1
+    if [ -x "$CLI_DIR/tailscale" ]; then
+        "$CLI_DIR/tailscale" version 2>/dev/null | head -1
     else
         echo "not installed"
     fi
 }
 
 installed_daemon_version() {
-    if [ -x "$INSTALL_DIR/tailscaled" ]; then
-        "$INSTALL_DIR/tailscaled" --version 2>/dev/null | head -1
+    if [ -x "$DAEMON_DIR/tailscaled" ]; then
+        "$DAEMON_DIR/tailscaled" --version 2>/dev/null | head -1
     else
         echo "not installed"
     fi
@@ -167,17 +168,17 @@ installed_daemon_version() {
 
 # --- Daemon management ---
 stop_daemon() {
-    if ! pgrep -x tailscaled &>/dev/null; then
+    if ! daemon_running; then
         return 0
     fi
     info "Stopping tailscaled..."
     pkill tailscaled 2>/dev/null || true
     local tries=0
-    while [ $tries -lt 10 ] && pgrep -x tailscaled &>/dev/null; do
+    while [ $tries -lt 10 ] && daemon_running; do
         sleep 0.5
         tries=$((tries + 1))
     done
-    if pgrep -x tailscaled &>/dev/null; then
+    if daemon_running; then
         warn "Daemon still running, sending SIGKILL..."
         pkill -9 tailscaled 2>/dev/null || true
         sleep 1
@@ -186,12 +187,12 @@ stop_daemon() {
 }
 
 ensure_daemon_running() {
-    if pgrep -x tailscaled &>/dev/null && [ -S "$SOCKET" ]; then
-        ok "Daemon already running (PID $(pgrep -x tailscaled | head -1))"
+    if daemon_running && [ -S "$SOCKET" ]; then
+        ok "Daemon already running (PID $(daemon_pid))"
         return 0
     fi
 
-    if pgrep -x tailscaled &>/dev/null && [ ! -S "$SOCKET" ]; then
+    if daemon_running && [ ! -S "$SOCKET" ]; then
         warn "Daemon running but socket missing -- restarting"
         stop_daemon
     fi
@@ -199,7 +200,7 @@ ensure_daemon_running() {
     info "Starting tailscaled..."
     rm -f "$SOCKET"
     mkdir -p "$SOCKET_DIR" "$STATE_DIR"
-    "$INSTALL_DIR/tailscaled" \
+    "$DAEMON_DIR/tailscaled" \
         --state="$STATE_DIR/tailscaled.state" \
         --socket="$SOCKET" \
         --tun=userspace-networking \
@@ -214,7 +215,7 @@ ensure_daemon_running() {
     done
 
     if [ -S "$SOCKET" ]; then
-        ok "Started (PID $(pgrep -x tailscaled | head -1))"
+        ok "Started (PID $(daemon_pid))"
     else
         warn "Daemon may still be starting up (socket not ready yet)"
     fi
@@ -245,13 +246,12 @@ install_autostart() {
     fi
 
     info "Adding auto-start to ~/.bashrc..."
-    # Add blank line separator only if .bashrc doesn't already end with one
     if [ -f "$BASHRC" ] && [ -s "$BASHRC" ] && [ -n "$(tail -c1 "$BASHRC")" ]; then
         echo "" >> "$BASHRC"
     fi
     cat >> "$BASHRC" << 'SNIPPET'
 # --- tailscaled-proot auto-start ---
-if command -v tailscaled &>/dev/null && ! pgrep -x tailscaled &>/dev/null; then
+if command -v tailscaled &>/dev/null && ! pgrep tailscaled &>/dev/null; then
     mkdir -p /var/run/tailscale /var/lib/tailscale
     rm -f /var/run/tailscale/tailscaled.sock
     tailscaled \
@@ -276,7 +276,6 @@ remove_autostart() {
         local tmp_bashrc
         tmp_bashrc=$(mktemp)
         sed "/$BASHRC_MARKER/,/$BASHRC_END_MARKER/d" "$BASHRC" > "$tmp_bashrc"
-        # Trim trailing blank lines to prevent accumulation across install/uninstall cycles
         if [ -s "$tmp_bashrc" ]; then
             local content
             content=$(cat "$tmp_bashrc")
@@ -390,7 +389,8 @@ cmd_install() {
 
     step 1 "Detecting environment"
     info "Architecture: $arch"
-    info "Install directory: $INSTALL_DIR"
+    info "CLI path:     $CLI_DIR/tailscale"
+    info "Daemon path:  $DAEMON_DIR/tailscaled"
 
     step 2 "Fetching release"
     local release_json latest_tag
@@ -403,8 +403,6 @@ cmd_install() {
         ok "Latest release: $latest_tag"
     fi
 
-    # If already installed with the same version, ensure everything is
-    # configured correctly without re-downloading or restarting the daemon.
     local current_ver
     current_ver=$(installed_daemon_version)
     if [ "$current_ver" = "$latest_ver" ]; then
@@ -440,32 +438,30 @@ cmd_install() {
     fi
 
     step 3 "Downloading binaries"
-    local tmp
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
+    _TMPDIR=$(mktemp -d)
 
     info "Downloading tailscale (CLI)..."
-    download "$tailscale_url" "$tmp/tailscale"
+    download "$tailscale_url" "$_TMPDIR/tailscale"
 
     info "Downloading tailscaled (daemon)..."
-    download "$tailscaled_url" "$tmp/tailscaled"
+    download "$tailscaled_url" "$_TMPDIR/tailscaled"
 
     step 4 "Verifying downloads"
-    verify_checksums "$tmp" "$release_json"
+    verify_checksums "$_TMPDIR" "$release_json"
 
     step 5 "Installing"
     stop_daemon
-    mkdir -p "$INSTALL_DIR"
-    cp "$tmp/tailscale" "$INSTALL_DIR/tailscale"
-    cp "$tmp/tailscaled" "$INSTALL_DIR/tailscaled"
-    chmod +x "$INSTALL_DIR/tailscale" "$INSTALL_DIR/tailscaled"
-    ok "Installed tailscale to $INSTALL_DIR/tailscale"
-    ok "Installed tailscaled to $INSTALL_DIR/tailscaled"
+    mkdir -p "$CLI_DIR" "$DAEMON_DIR"
+    cp "$_TMPDIR/tailscale" "$CLI_DIR/tailscale"
+    cp "$_TMPDIR/tailscaled" "$DAEMON_DIR/tailscaled"
+    chmod +x "$CLI_DIR/tailscale" "$DAEMON_DIR/tailscaled"
+    ok "Installed $CLI_DIR/tailscale"
+    ok "Installed $DAEMON_DIR/tailscaled"
 
     if dpkg -l tailscale 2>/dev/null | grep -q '^ii'; then
         info "Removing conflicting apt package 'tailscale'..."
         apt-get remove -y tailscale &>/dev/null || true
-        ok "Apt package removed (our binaries in $INSTALL_DIR take precedence)"
+        ok "Apt package removed"
     fi
 
     step 6 "Configuring auto-start"
@@ -504,7 +500,7 @@ cmd_update() {
 
     TOTAL_STEPS=7
 
-    if [ ! -x "$INSTALL_DIR/tailscaled" ]; then
+    if [ ! -x "$DAEMON_DIR/tailscaled" ]; then
         err "tailscaled-proot is not installed. Run: tailscaled-proot install"
         exit 1
     fi
@@ -555,24 +551,22 @@ cmd_update() {
     fi
 
     step 4 "Downloading binaries"
-    local tmp
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
+    _TMPDIR=$(mktemp -d)
 
     info "Downloading tailscale (CLI)..."
-    download "$tailscale_url" "$tmp/tailscale"
+    download "$tailscale_url" "$_TMPDIR/tailscale"
 
     info "Downloading tailscaled (daemon)..."
-    download "$tailscaled_url" "$tmp/tailscaled"
+    download "$tailscaled_url" "$_TMPDIR/tailscaled"
 
     step 5 "Verifying downloads"
-    verify_checksums "$tmp" "$release_json"
+    verify_checksums "$_TMPDIR" "$release_json"
 
     step 6 "Installing"
     stop_daemon
-    cp "$tmp/tailscale" "$INSTALL_DIR/tailscale"
-    cp "$tmp/tailscaled" "$INSTALL_DIR/tailscaled"
-    chmod +x "$INSTALL_DIR/tailscale" "$INSTALL_DIR/tailscaled"
+    cp "$_TMPDIR/tailscale" "$CLI_DIR/tailscale"
+    cp "$_TMPDIR/tailscaled" "$DAEMON_DIR/tailscaled"
+    chmod +x "$CLI_DIR/tailscale" "$DAEMON_DIR/tailscaled"
     ok "Binaries updated"
 
     step 7 "Restarting daemon"
@@ -590,19 +584,18 @@ cmd_status() {
     echo "  ======================="
     echo ""
 
-    # Installed versions
     local cli_ver daemon_ver
     cli_ver=$(installed_cli_version)
     daemon_ver=$(installed_daemon_version)
 
     if [ "$cli_ver" != "not installed" ]; then
-        ok "tailscale  (CLI):    $cli_ver"
+        ok "tailscale  (CLI):    $cli_ver  ($CLI_DIR/tailscale)"
     else
         err "tailscale  (CLI):    not installed"
     fi
 
     if [ "$daemon_ver" != "not installed" ]; then
-        ok "tailscaled (daemon): $daemon_ver"
+        ok "tailscaled (daemon): $daemon_ver  ($DAEMON_DIR/tailscaled)"
     else
         err "tailscaled (daemon): not installed"
     fi
@@ -611,10 +604,9 @@ cmd_status() {
         warn "Version mismatch between CLI and daemon"
     fi
 
-    # Running status
     echo ""
-    if pgrep -x tailscaled &>/dev/null; then
-        ok "Daemon: running (PID $(pgrep -x tailscaled | head -1))"
+    if daemon_running; then
+        ok "Daemon: running (PID $(daemon_pid))"
     else
         warn "Daemon: not running"
     fi
@@ -625,26 +617,22 @@ cmd_status() {
         warn "Socket: not found"
     fi
 
-    # Auto-start
     if [ -f "$BASHRC" ] && grep -qF "$BASHRC_MARKER" "$BASHRC"; then
         ok "Auto-start: configured"
     else
         warn "Auto-start: not configured (run: tailscaled-proot install)"
     fi
 
-    # Tailscale network status
-    if pgrep -x tailscaled &>/dev/null && [ -S "$SOCKET" ]; then
+    if daemon_running && [ -S "$SOCKET" ] && [ -x "$CLI_DIR/tailscale" ]; then
         echo ""
         info "Network status:"
-        "$INSTALL_DIR/tailscale" status 2>&1 | sed 's/^/    /' || true
+        "$CLI_DIR/tailscale" status 2>&1 | sed 's/^/    /' || true
     fi
 
-    # Check for updates
     if command -v curl &>/dev/null; then
         echo ""
         info "Checking for updates..."
 
-        # Script updates
         local remote_script_ver
         remote_script_ver=$(get_remote_script_version 2>/dev/null) || true
         if [ -n "$remote_script_ver" ] && [ "$SCRIPT_VERSION" != "$remote_script_ver" ]; then
@@ -653,7 +641,6 @@ cmd_status() {
             ok "Script up to date ($SCRIPT_VERSION)"
         fi
 
-        # Binary updates
         if [ "$daemon_ver" != "not installed" ]; then
             local release_json latest_tag
             if release_json=$(get_latest_release 2>/dev/null); then
@@ -695,18 +682,28 @@ cmd_uninstall() {
     local had_something=false
 
     step 1 "Stopping daemon"
-    stop_daemon
+    if daemon_running; then
+        stop_daemon
+        had_something=true
+    else
+        ok "Daemon not running"
+    fi
 
     step 2 "Removing binaries"
-    for bin in tailscale tailscaled; do
-        if [ -f "$INSTALL_DIR/$bin" ]; then
-            rm -f "$INSTALL_DIR/$bin"
-            ok "Removed $INSTALL_DIR/$bin"
-            had_something=true
-        else
-            ok "$INSTALL_DIR/$bin not present"
-        fi
-    done
+    if [ -f "$CLI_DIR/tailscale" ]; then
+        rm -f "$CLI_DIR/tailscale"
+        ok "Removed $CLI_DIR/tailscale"
+        had_something=true
+    else
+        ok "$CLI_DIR/tailscale not present"
+    fi
+    if [ -f "$DAEMON_DIR/tailscaled" ]; then
+        rm -f "$DAEMON_DIR/tailscaled"
+        ok "Removed $DAEMON_DIR/tailscaled"
+        had_something=true
+    else
+        ok "$DAEMON_DIR/tailscaled not present"
+    fi
 
     if $purge; then
         step 3 "Removing auto-start"
@@ -734,7 +731,7 @@ cmd_uninstall() {
         info "Config and state preserved -- reinstall with: tailscaled-proot install"
         info "To remove everything:  tailscaled-proot uninstall --purge"
     fi
-    info "To remove this script: rm -f $INSTALL_DIR/tailscaled-proot"
+    info "To remove this script: rm -f $SCRIPT_DIR/tailscaled-proot"
     echo ""
 }
 
