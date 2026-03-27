@@ -167,15 +167,35 @@ installed_daemon_version() {
 
 # --- Daemon management ---
 stop_daemon() {
-    if pgrep -x tailscaled &>/dev/null; then
-        info "Stopping tailscaled..."
-        pkill tailscaled 2>/dev/null || true
-        sleep 1
-        ok "Stopped"
+    if ! pgrep -x tailscaled &>/dev/null; then
+        return 0
     fi
+    info "Stopping tailscaled..."
+    pkill tailscaled 2>/dev/null || true
+    local tries=0
+    while [ $tries -lt 10 ] && pgrep -x tailscaled &>/dev/null; do
+        sleep 0.5
+        tries=$((tries + 1))
+    done
+    if pgrep -x tailscaled &>/dev/null; then
+        warn "Daemon still running, sending SIGKILL..."
+        pkill -9 tailscaled 2>/dev/null || true
+        sleep 1
+    fi
+    ok "Stopped"
 }
 
-start_daemon() {
+ensure_daemon_running() {
+    if pgrep -x tailscaled &>/dev/null && [ -S "$SOCKET" ]; then
+        ok "Daemon already running (PID $(pgrep -x tailscaled | head -1))"
+        return 0
+    fi
+
+    if pgrep -x tailscaled &>/dev/null && [ ! -S "$SOCKET" ]; then
+        warn "Daemon running but socket missing -- restarting"
+        stop_daemon
+    fi
+
     info "Starting tailscaled..."
     rm -f "$SOCKET"
     mkdir -p "$SOCKET_DIR" "$STATE_DIR"
@@ -225,8 +245,11 @@ install_autostart() {
     fi
 
     info "Adding auto-start to ~/.bashrc..."
+    # Add blank line separator only if .bashrc doesn't already end with one
+    if [ -f "$BASHRC" ] && [ -s "$BASHRC" ] && [ -n "$(tail -c1 "$BASHRC")" ]; then
+        echo "" >> "$BASHRC"
+    fi
     cat >> "$BASHRC" << 'SNIPPET'
-
 # --- tailscaled-proot auto-start ---
 if command -v tailscaled &>/dev/null && ! pgrep -x tailscaled &>/dev/null; then
     mkdir -p /var/run/tailscale /var/lib/tailscale
@@ -253,6 +276,12 @@ remove_autostart() {
         local tmp_bashrc
         tmp_bashrc=$(mktemp)
         sed "/$BASHRC_MARKER/,/$BASHRC_END_MARKER/d" "$BASHRC" > "$tmp_bashrc"
+        # Trim trailing blank lines to prevent accumulation across install/uninstall cycles
+        if [ -s "$tmp_bashrc" ]; then
+            local content
+            content=$(cat "$tmp_bashrc")
+            printf '%s\n' "$content" > "$tmp_bashrc"
+        fi
         mv "$tmp_bashrc" "$BASHRC"
         ok "Auto-start removed"
     else
@@ -362,19 +391,43 @@ cmd_install() {
     step 1 "Detecting environment"
     info "Architecture: $arch"
     info "Install directory: $INSTALL_DIR"
-    if [ -x "$INSTALL_DIR/tailscaled" ]; then
-        warn "Existing installation found: $(installed_daemon_version)"
-        warn "Will be replaced"
-    fi
 
     step 2 "Fetching release"
     local release_json latest_tag
     release_json=$(fetch_release "$target_version")
     latest_tag=$(get_latest_tag "$release_json")
+    local latest_ver="${latest_tag#v}"
     if [ -n "$target_version" ]; then
         ok "Requested release: $latest_tag"
     else
         ok "Latest release: $latest_tag"
+    fi
+
+    # If already installed with the same version, ensure everything is
+    # configured correctly without re-downloading or restarting the daemon.
+    local current_ver
+    current_ver=$(installed_daemon_version)
+    if [ "$current_ver" = "$latest_ver" ]; then
+        ok "Already installed: $current_ver"
+
+        step 3 "Ensuring configuration"
+        if dpkg -l tailscale 2>/dev/null | grep -q '^ii'; then
+            info "Removing conflicting apt package 'tailscale'..."
+            apt-get remove -y tailscale &>/dev/null || true
+            ok "Apt package removed"
+        fi
+        install_autostart
+        ensure_daemon_running
+
+        echo ""
+        echo "  =========================="
+        ok "Already installed and running ($current_ver)"
+        echo ""
+        return
+    fi
+
+    if [ "$current_ver" != "not installed" ]; then
+        info "Existing installation: $current_ver → $latest_ver"
     fi
 
     local tailscale_url tailscaled_url
@@ -419,7 +472,7 @@ cmd_install() {
     install_autostart
 
     step 7 "Starting daemon"
-    start_daemon
+    ensure_daemon_running
 
     echo ""
     echo "  =========================="
@@ -523,7 +576,7 @@ cmd_update() {
     ok "Binaries updated"
 
     step 7 "Restarting daemon"
-    start_daemon
+    ensure_daemon_running
 
     echo ""
     echo "  ========================"
@@ -631,6 +684,7 @@ cmd_uninstall() {
     echo "  ============================"
 
     TOTAL_STEPS=3
+    local had_something=false
 
     step 1 "Stopping daemon"
     stop_daemon
@@ -640,6 +694,9 @@ cmd_uninstall() {
         if [ -f "$INSTALL_DIR/$bin" ]; then
             rm -f "$INSTALL_DIR/$bin"
             ok "Removed $INSTALL_DIR/$bin"
+            had_something=true
+        else
+            ok "$INSTALL_DIR/$bin not present"
         fi
     done
 
@@ -648,10 +705,14 @@ cmd_uninstall() {
 
     echo ""
     echo "  ============================"
-    ok "Uninstalled"
-    echo ""
-    info "Tailscale state is preserved in $STATE_DIR/"
-    info "To remove state too:   rm -rf $STATE_DIR"
+    if $had_something; then
+        ok "Uninstalled"
+        echo ""
+        info "Tailscale state is preserved in $STATE_DIR/"
+        info "To remove state too:   rm -rf $STATE_DIR"
+    else
+        ok "Nothing to uninstall (already clean)"
+    fi
     info "To remove this script: rm -f $INSTALL_DIR/tailscaled-proot"
     echo ""
 }
