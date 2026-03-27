@@ -679,17 +679,25 @@ cmd_status() {
 }
 
 cmd_uninstall() {
+    local purge=false
+    [ "${1:-}" = "--purge" ] && purge=true
+
     echo ""
     echo "  tailscaled-proot uninstaller"
     echo "  ============================"
 
-    TOTAL_STEPS=3
+    if $purge; then
+        TOTAL_STEPS=4
+    else
+        TOTAL_STEPS=2
+    fi
+
     local had_something=false
 
     step 1 "Stopping daemon"
     stop_daemon
 
-    step 2 "Removing files"
+    step 2 "Removing binaries"
     for bin in tailscale tailscaled; do
         if [ -f "$INSTALL_DIR/$bin" ]; then
             rm -f "$INSTALL_DIR/$bin"
@@ -700,18 +708,31 @@ cmd_uninstall() {
         fi
     done
 
-    step 3 "Removing auto-start"
-    remove_autostart
+    if $purge; then
+        step 3 "Removing auto-start"
+        remove_autostart
+
+        step 4 "Removing state"
+        if [ -d "$STATE_DIR" ]; then
+            rm -rf "$STATE_DIR"
+            ok "Removed $STATE_DIR"
+        else
+            ok "No state directory found"
+        fi
+    fi
 
     echo ""
     echo "  ============================"
     if $had_something; then
         ok "Uninstalled"
-        echo ""
-        info "Tailscale state is preserved in $STATE_DIR/"
-        info "To remove state too:   rm -rf $STATE_DIR"
     else
         ok "Nothing to uninstall (already clean)"
+    fi
+
+    if ! $purge; then
+        echo ""
+        info "Config and state preserved -- reinstall with: tailscaled-proot install"
+        info "To remove everything:  tailscaled-proot uninstall --purge"
     fi
     info "To remove this script: rm -f $INSTALL_DIR/tailscaled-proot"
     echo ""
@@ -729,7 +750,8 @@ cmd_help() {
     tailscaled-proot install [version]   Install and set up auto-start (latest or specific version)
     tailscaled-proot update  [version]   Update to latest or specific version
     tailscaled-proot status              Show current versions and daemon status
-    tailscaled-proot uninstall           Remove tailscale, tailscaled, and auto-start
+    tailscaled-proot uninstall           Remove binaries (keeps config + state for easy reinstall)
+    tailscaled-proot uninstall --purge   Remove everything (binaries, auto-start, state)
     tailscaled-proot help                Show this help message
 
   Examples:
@@ -737,6 +759,8 @@ cmd_help() {
     tailscaled-proot install v1.96.2     Install a specific version
     tailscaled-proot update              Update to the latest release
     tailscaled-proot update v1.94.0      Downgrade/pin to a specific version
+    tailscaled-proot uninstall           Remove binaries, reinstall reconnects automatically
+    tailscaled-proot uninstall --purge   Full removal including Tailscale identity
 
 EOF
     echo "  Repository: https://github.com/$GITHUB_REPO"
@@ -751,7 +775,7 @@ case "${1:-help}" in
     install)   cmd_install "${2:-}" ;;
     update)    cmd_update "${2:-}" ;;
     status)    cmd_status ;;
-    uninstall) cmd_uninstall ;;
+    uninstall) cmd_uninstall "${2:-}" ;;
     help|--help|-h) cmd_help ;;
     --version|-v)
         echo "tailscaled-proot $SCRIPT_VERSION"
