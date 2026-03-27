@@ -8,11 +8,12 @@
 # Usage:
 #   ./build-tailscaled.sh [version]      # build only
 #   ./build-tailscaled.sh --upgrade      # full upgrade: unhold apt pkg, upgrade CLI, build, install, re-hold
+#   ./build-tailscaled.sh --upgrade --force  # upgrade even if versions already match
 #
 # Examples:
 #   ./build-tailscaled.sh                # builds latest tagged version
 #   ./build-tailscaled.sh v1.96.2        # builds specific version
-#   ./build-tailscaled.sh --upgrade      # upgrades everything to latest
+#   ./build-tailscaled.sh --upgrade      # upgrades everything to latest (skips if already up to date)
 
 set -euo pipefail
 
@@ -21,14 +22,17 @@ PATCH_FILE="$SCRIPT_DIR/tailscale-proot-distro.patch"
 BUILD_DIR="/tmp/tailscale-proot-build"
 OUTPUT_DIR="$SCRIPT_DIR"
 UPGRADE_MODE=false
+FORCE=false
 VERSION=""
 
 # --- Parse args ---
-if [ "${1:-}" = "--upgrade" ]; then
-    UPGRADE_MODE=true
-else
-    VERSION="${1:-}"
-fi
+for arg in "$@"; do
+    case "$arg" in
+        --upgrade) UPGRADE_MODE=true ;;
+        --force)   FORCE=true ;;
+        *)         VERSION="$arg" ;;
+    esac
+done
 
 # --- Prerequisites ---
 check_prereqs() {
@@ -57,8 +61,27 @@ check_prereqs() {
     fi
 }
 
+# --- Check if already up to date ---
+check_versions() {
+    if ! command -v tailscale &>/dev/null || ! command -v tailscaled &>/dev/null; then
+        return 1
+    fi
+
+    local cli_long daemon_long
+    cli_long=$(tailscale version 2>/dev/null | grep 'long version:' | awk '{print $3}')
+    daemon_long=$(tailscaled --version 2>/dev/null | grep 'long version:' | awk '{print $3}')
+
+    if [ -n "$cli_long" ] && [ -n "$daemon_long" ] && [ "$cli_long" = "$daemon_long" ]; then
+        return 0
+    fi
+    return 1
+}
+
 # --- Upgrade: unhold, apt upgrade, determine version ---
 upgrade_cli() {
+    local old_cli_ver
+    old_cli_ver=$(tailscale version 2>/dev/null | head -1)
+
     echo "==> Unholding tailscale package..."
     apt-mark unhold tailscale 2>/dev/null || true
 
@@ -68,7 +91,13 @@ upgrade_cli() {
 
     # Get the new CLI version to use as the build target
     VERSION="v$(tailscale version 2>/dev/null | head -1)"
-    echo "==> CLI upgraded to $VERSION"
+    local new_cli_ver="${VERSION#v}"
+
+    if [ "$old_cli_ver" = "$new_cli_ver" ]; then
+        echo "==> CLI is already at $VERSION (no update available from apt)"
+    else
+        echo "==> CLI upgraded from v$old_cli_ver to $VERSION"
+    fi
 }
 
 # --- Clone ---
@@ -168,6 +197,17 @@ check_prereqs
 if [ "$UPGRADE_MODE" = true ]; then
     echo "===== Full Upgrade Mode ====="
     upgrade_cli
+
+    if check_versions && [ "$FORCE" = false ]; then
+        echo ""
+        echo "==> Already up to date: CLI and daemon versions match."
+        echo "    $(tailscale version 2>/dev/null | grep 'long version:')"
+        hold_package
+        echo ""
+        echo "Nothing to do. Use --force to rebuild anyway."
+        exit 0
+    fi
+
     clone_source
     apply_patch
     build_binary
