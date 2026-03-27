@@ -10,7 +10,7 @@
 #
 # Examples:
 #   ./build-tailscaled.sh           # builds latest tagged version
-#   ./build-tailscaled.sh v1.94.2   # builds specific version
+#   ./build-tailscaled.sh v1.96.2   # builds specific version
 
 set -euo pipefail
 
@@ -29,9 +29,9 @@ check_prereqs() {
     if [ ${#missing[@]} -gt 0 ]; then
         echo "ERROR: missing required tools: ${missing[*]}"
         echo ""
-        echo "Install Go (1.25+):"
-        echo "  curl -LO https://go.dev/dl/go1.25.5.linux-arm64.tar.gz"
-        echo "  rm -rf /usr/local/go && tar -C /usr/local -xzf go1.25.5.linux-arm64.tar.gz"
+        echo "Install Go (1.26+):"
+        echo "  curl -LO https://go.dev/dl/go1.26.1.linux-arm64.tar.gz"
+        echo "  rm -rf /usr/local/go && tar -C /usr/local -xzf go1.26.1.linux-arm64.tar.gz"
         echo "  export PATH=/usr/local/go/bin:\$PATH"
         exit 1
     fi
@@ -42,8 +42,8 @@ check_prereqs() {
     fi
 
     GO_VER=$(go version | grep -oP 'go\K[0-9]+\.[0-9]+')
-    if [ "$(echo "$GO_VER < 1.25" | bc -l 2>/dev/null || echo 1)" = "1" ]; then
-        echo "WARNING: Go 1.25+ recommended. You have $(go version)"
+    if [ "$(echo "$GO_VER < 1.26" | bc -l 2>/dev/null || echo 1)" = "1" ]; then
+        echo "WARNING: Go 1.26+ recommended. You have $(go version)"
     fi
 }
 
@@ -71,7 +71,20 @@ apply_patch() {
 build_binary() {
     echo "Building tailscaled (GOOS=android GOARCH=arm64)..."
     cd "$BUILD_DIR"
-    CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o "$OUTPUT_DIR/tailscaled" ./cmd/tailscaled
+
+    # Match the installed tailscale client's version string to avoid
+    # "client version != tailscaled server version" warnings.
+    LDFLAGS=""
+    if command -v tailscale &>/dev/null; then
+        CLIENT_LONG=$(tailscale version 2>/dev/null | grep 'long version:' | awk '{print $3}')
+        CLIENT_SHORT=$(tailscale version 2>/dev/null | head -1)
+        if [ -n "$CLIENT_LONG" ] && [ -n "$CLIENT_SHORT" ]; then
+            echo "Stamping version to match client: $CLIENT_LONG"
+            LDFLAGS="-X tailscale.com/version.longStamp=$CLIENT_LONG -X tailscale.com/version.shortStamp=$CLIENT_SHORT"
+        fi
+    fi
+
+    CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags "$LDFLAGS" -o "$OUTPUT_DIR/tailscaled" ./cmd/tailscaled
     echo ""
     echo "Build complete: $OUTPUT_DIR/tailscaled"
     "$OUTPUT_DIR/tailscaled" --version

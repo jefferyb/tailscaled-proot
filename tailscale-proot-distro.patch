@@ -1,5 +1,5 @@
 diff --git a/envknob/featureknob/featureknob.go b/envknob/featureknob/featureknob.go
-index 5a54a1c..ca5fb2a 100644
+index 0493665..6ea2cc5 100644
 --- a/envknob/featureknob/featureknob.go
 +++ b/envknob/featureknob/featureknob.go
 @@ -31,7 +31,7 @@ func CanRunTailscaleSSH() error {
@@ -12,11 +12,11 @@ index 5a54a1c..ca5fb2a 100644
  		return errors.New("The Tailscale SSH server is not supported on " + runtime.GOOS)
  	}
 diff --git a/feature/taildrop/fileops_fs.go b/feature/taildrop/fileops_fs.go
-index 4fecbe4..91997d7 100644
+index 4a5b3e7..0eeecb8 100644
 --- a/feature/taildrop/fileops_fs.go
 +++ b/feature/taildrop/fileops_fs.go
 @@ -1,6 +1,6 @@
- // Copyright (c) Tailscale Inc & AUTHORS
+ // Copyright (c) Tailscale Inc & contributors
  // SPDX-License-Identifier: BSD-3-Clause
 -//go:build !android
 +//go:build !ts_omit_taildrop
@@ -24,11 +24,11 @@ index 4fecbe4..91997d7 100644
  package taildrop
  
 diff --git a/ipn/ipnlocal/ssh.go b/ipn/ipnlocal/ssh.go
-index e2c2f50..52f5cf5 100644
+index 52b3066..e7c045c 100644
 --- a/ipn/ipnlocal/ssh.go
 +++ b/ipn/ipnlocal/ssh.go
 @@ -1,7 +1,7 @@
- // Copyright (c) Tailscale Inc & AUTHORS
+ // Copyright (c) Tailscale Inc & contributors
  // SPDX-License-Identifier: BSD-3-Clause
  
 -//go:build ((linux && !android) || (darwin && !ios) || freebsd || openbsd || plan9) && !ts_omit_ssh
@@ -37,11 +37,11 @@ index e2c2f50..52f5cf5 100644
  package ipnlocal
  
 diff --git a/ipn/ipnlocal/ssh_stub.go b/ipn/ipnlocal/ssh_stub.go
-index 6b2e360..2647100 100644
+index 9a997c9..6af84de 100644
 --- a/ipn/ipnlocal/ssh_stub.go
 +++ b/ipn/ipnlocal/ssh_stub.go
 @@ -1,7 +1,7 @@
- // Copyright (c) Tailscale Inc & AUTHORS
+ // Copyright (c) Tailscale Inc & contributors
  // SPDX-License-Identifier: BSD-3-Clause
  
 -//go:build ts_omit_ssh || ios || android || (!linux && !darwin && !freebsd && !openbsd && !plan9)
@@ -50,7 +50,7 @@ index 6b2e360..2647100 100644
  package ipnlocal
  
 diff --git a/net/netmon/state.go b/net/netmon/state.go
-index 79dd8a0..c6a153b 100644
+index cdfa1d0..cbf04c0 100644
 --- a/net/netmon/state.go
 +++ b/net/netmon/state.go
 @@ -9,6 +9,7 @@
@@ -61,7 +61,7 @@ index 79dd8a0..c6a153b 100644
  	"runtime"
  	"slices"
  	"sort"
-@@ -755,7 +756,7 @@ func netInterfaces() ([]Interface, error) {
+@@ -760,7 +761,7 @@ func netInterfaces() ([]Interface, error) {
  	}
  	ifs, err := net.Interfaces()
  	if err != nil {
@@ -70,7 +70,7 @@ index 79dd8a0..c6a153b 100644
  	}
  	ret := make([]Interface, len(ifs))
  	for i := range ifs {
-@@ -764,6 +765,141 @@ func netInterfaces() ([]Interface, error) {
+@@ -769,6 +770,141 @@ func netInterfaces() ([]Interface, error) {
  	return ret, nil
  }
  
@@ -213,11 +213,11 @@ index 79dd8a0..c6a153b 100644
  // by DefaultRoute.
  type DefaultRouteDetails struct {
 diff --git a/ssh/tailssh/auditd_linux.go b/ssh/tailssh/auditd_linux.go
-index e9f551d..57ab5ae 100644
+index bddb901..66e5084 100644
 --- a/ssh/tailssh/auditd_linux.go
 +++ b/ssh/tailssh/auditd_linux.go
 @@ -1,7 +1,7 @@
- // Copyright (c) Tailscale Inc & AUTHORS
+ // Copyright (c) Tailscale Inc & contributors
  // SPDX-License-Identifier: BSD-3-Clause
  
 -//go:build linux && !android
@@ -226,7 +226,7 @@ index e9f551d..57ab5ae 100644
  package tailssh
  
 diff --git a/ssh/tailssh/incubator.go b/ssh/tailssh/incubator.go
-index f756467..e1b5ef3 100644
+index b414ce3..dd2392c 100644
 --- a/ssh/tailssh/incubator.go
 +++ b/ssh/tailssh/incubator.go
 @@ -7,7 +7,7 @@
@@ -239,11 +239,11 @@ index f756467..e1b5ef3 100644
  package tailssh
  
 diff --git a/ssh/tailssh/incubator_linux.go b/ssh/tailssh/incubator_linux.go
-index 4dfb9f2..bcbe0e2 100644
+index cff4616..3539ffc 100644
 --- a/ssh/tailssh/incubator_linux.go
 +++ b/ssh/tailssh/incubator_linux.go
 @@ -1,7 +1,7 @@
- // Copyright (c) Tailscale Inc & AUTHORS
+ // Copyright (c) Tailscale Inc & contributors
  // SPDX-License-Identifier: BSD-3-Clause
  
 -//go:build linux && !android
@@ -252,11 +252,11 @@ index 4dfb9f2..bcbe0e2 100644
  package tailssh
  
 diff --git a/ssh/tailssh/tailssh.go b/ssh/tailssh/tailssh.go
-index 91e1779..2738cde 100644
+index cb56f70..28c9569 100644
 --- a/ssh/tailssh/tailssh.go
 +++ b/ssh/tailssh/tailssh.go
 @@ -1,7 +1,7 @@
- // Copyright (c) Tailscale Inc & AUTHORS
+ // Copyright (c) Tailscale Inc & contributors
  // SPDX-License-Identifier: BSD-3-Clause
  
 -//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd || plan9
@@ -265,11 +265,11 @@ index 91e1779..2738cde 100644
  // Package tailssh is an SSH server integrated into Tailscale.
  package tailssh
 diff --git a/ssh/tailssh/user.go b/ssh/tailssh/user.go
-index ac92c76..097f0d2 100644
+index 7da6bb4..3ab2322 100644
 --- a/ssh/tailssh/user.go
 +++ b/ssh/tailssh/user.go
 @@ -1,7 +1,7 @@
- // Copyright (c) Tailscale Inc & AUTHORS
+ // Copyright (c) Tailscale Inc & contributors
  // SPDX-License-Identifier: BSD-3-Clause
  
 -//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd || plan9
