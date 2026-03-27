@@ -136,7 +136,7 @@ jobs:
           echo "short=$SHORT" >> "$GITHUB_OUTPUT"
           echo "Version stamps: short=$SHORT long=$LONG"
 
-      - name: Build patched tailscaled for all architectures
+      - name: Build patched tailscaled
         if: steps.check.outputs.should_build == 'true'
         run: |
           cd /tmp/tailscale-src
@@ -145,8 +145,10 @@ jobs:
           LDFLAGS="-X tailscale.com/version.longStamp=$LONG -X tailscale.com/version.shortStamp=$SHORT"
           mkdir -p /tmp/release
 
-          for arch in arm64 amd64 arm; do
-            echo "==> Building tailscaled ($arch)..."
+          # android/amd64 requires cgo, so we only build arm64 and arm
+          # (covers virtually all Android/PRoot-Distro devices)
+          for arch in arm64 arm; do
+            echo "==> Building tailscaled ($arch) [GOOS=android]..."
             CGO_ENABLED=0 GOOS=android GOARCH="$arch" go build \
               -ldflags "$LDFLAGS" \
               -o "/tmp/release/tailscaled-${arch}" \
@@ -164,11 +166,12 @@ jobs:
       - name: Verify build
         if: steps.check.outputs.should_build == 'true'
         run: |
-          echo "==> tailscaled version:"
-          /tmp/release/tailscaled-amd64 --version
-          echo ""
-          echo "==> tailscale CLI version:"
+          echo "==> tailscale CLI version (amd64, runs on this runner):"
           /tmp/release/tailscale-amd64 version
+          echo ""
+          echo "==> Patched daemon binaries built:"
+          file /tmp/release/tailscaled-arm64
+          file /tmp/release/tailscaled-arm
 
       - name: Create GitHub Release
         if: steps.check.outputs.should_build == 'true'
@@ -196,7 +199,6 @@ jobs:
           | File | Description |
           |------|-------------|
           | \`tailscaled-arm64\` | Patched daemon for aarch64 (most Android devices) |
-          | \`tailscaled-amd64\` | Patched daemon for x86_64 (Chromebooks, emulators) |
           | \`tailscaled-arm\` | Patched daemon for 32-bit ARM |
           | \`tailscale-arm64\` | Official CLI for aarch64 |
           | \`tailscale-amd64\` | Official CLI for x86_64 |
