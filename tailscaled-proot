@@ -269,11 +269,16 @@ detect_arch() {
         aarch64|arm64) echo "arm64" ;;
         x86_64|amd64)
             err "x86_64/amd64 is not supported for the patched tailscaled daemon."
-            err "Android's GOOS=android/amd64 requires cgo which prevents static builds."
+            err "GOOS=android/amd64 requires cgo which prevents static builds."
             err "If you're on a regular Linux x86_64 system, use the official tailscale package instead."
             exit 1
             ;;
-        armv7l|armhf)  echo "arm" ;;
+        armv7l|armhf)
+            err "32-bit ARM (armv7l) is not supported for the patched tailscaled daemon."
+            err "GOOS=android/arm requires cgo which prevents static builds."
+            err "Only arm64 (aarch64) is supported. See the README for building from source."
+            exit 1
+            ;;
         *)
             err "Unsupported architecture: $arch"
             exit 1
