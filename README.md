@@ -117,13 +117,35 @@ PRoot-Distro does not support systemd (it requires PID 1 + real root). Instead, 
 
 ## Upgrading
 
-To build against a newer tailscale version:
+The `tailscale` apt package is held (`apt-mark hold`) after install to prevent `apt upgrade` from overwriting our patched `tailscaled` binary. To upgrade to a new version:
+
+### One-command upgrade
 
 ```bash
-./build-tailscaled.sh v1.XX.X
+./build-tailscaled.sh --upgrade
 ```
 
-The patch may need minor adjustments if upstream changes the patched files significantly.
+This automatically: unholds the apt package, upgrades the `tailscale` CLI, rebuilds our patched `tailscaled` to match, installs it, re-holds the package, and restarts the daemon.
+
+### Manual upgrade
+
+```bash
+# 1. Unhold and upgrade the CLI
+apt-mark unhold tailscale
+apt update && apt install -y --only-upgrade tailscale
+
+# 2. Rebuild to match the new version
+./build-tailscaled.sh v1.XX.X
+
+# 3. Install and re-hold
+cp tailscaled /usr/sbin/tailscaled
+apt-mark hold tailscale
+
+# 4. Restart
+pkill tailscaled  # auto-restarts on next shell, or run start-tailscaled &
+```
+
+The patch may need minor adjustments if upstream changes the patched files significantly. See `AGENTS.md` for regeneration instructions.
 
 ## Background
 

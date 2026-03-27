@@ -6,19 +6,29 @@
 # instead of the netlink-based one.
 #
 # Usage:
-#   ./build-tailscaled.sh [version]
+#   ./build-tailscaled.sh [version]      # build only
+#   ./build-tailscaled.sh --upgrade      # full upgrade: unhold apt pkg, upgrade CLI, build, install, re-hold
 #
 # Examples:
-#   ./build-tailscaled.sh           # builds latest tagged version
-#   ./build-tailscaled.sh v1.96.2   # builds specific version
+#   ./build-tailscaled.sh                # builds latest tagged version
+#   ./build-tailscaled.sh v1.96.2        # builds specific version
+#   ./build-tailscaled.sh --upgrade      # upgrades everything to latest
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PATCH_FILE="$SCRIPT_DIR/tailscale-proot-distro.patch"
-VERSION="${1:-}"
 BUILD_DIR="/tmp/tailscale-proot-build"
 OUTPUT_DIR="$SCRIPT_DIR"
+UPGRADE_MODE=false
+VERSION=""
+
+# --- Parse args ---
+if [ "${1:-}" = "--upgrade" ]; then
+    UPGRADE_MODE=true
+else
+    VERSION="${1:-}"
+fi
 
 # --- Prerequisites ---
 check_prereqs() {
@@ -47,6 +57,20 @@ check_prereqs() {
     fi
 }
 
+# --- Upgrade: unhold, apt upgrade, determine version ---
+upgrade_cli() {
+    echo "==> Unholding tailscale package..."
+    apt-mark unhold tailscale 2>/dev/null || true
+
+    echo "==> Upgrading tailscale CLI via apt..."
+    apt update -qq
+    apt install -y --only-upgrade tailscale
+
+    # Get the new CLI version to use as the build target
+    VERSION="v$(tailscale version 2>/dev/null | head -1)"
+    echo "==> CLI upgraded to $VERSION"
+}
+
 # --- Clone ---
 clone_source() {
     rm -rf "$BUILD_DIR"
@@ -63,7 +87,15 @@ clone_source() {
 apply_patch() {
     echo "Applying PRoot-Distro patch..."
     cd "$BUILD_DIR"
-    git apply "$PATCH_FILE"
+    if ! git apply "$PATCH_FILE" 2>/dev/null; then
+        echo ""
+        echo "ERROR: Patch failed to apply cleanly against $VERSION."
+        echo "The upstream source has likely changed. The patch needs to be regenerated."
+        echo ""
+        echo "See AGENTS.md section 'Regenerating the Patch When It Fails to Apply'"
+        echo "or manually apply the changes and run:  git diff > $PATCH_FILE"
+        exit 1
+    fi
     echo "Patch applied successfully."
 }
 
@@ -90,6 +122,40 @@ build_binary() {
     "$OUTPUT_DIR/tailscaled" --version
 }
 
+# --- Install (upgrade mode only) ---
+install_binary() {
+    echo "==> Installing patched tailscaled to /usr/sbin/tailscaled..."
+    cp "$OUTPUT_DIR/tailscaled" /usr/sbin/tailscaled
+    chmod +x /usr/sbin/tailscaled
+}
+
+# --- Hold package ---
+hold_package() {
+    echo "==> Holding tailscale package to prevent apt from overwriting our binary..."
+    apt-mark hold tailscale
+}
+
+# --- Restart daemon ---
+restart_daemon() {
+    echo "==> Restarting tailscaled..."
+    pkill tailscaled 2>/dev/null || true
+    sleep 1
+    rm -f /var/run/tailscale/tailscaled.sock
+    mkdir -p /var/run/tailscale /var/lib/tailscale
+    tailscaled \
+        --state=/var/lib/tailscale/tailscaled.state \
+        --socket=/var/run/tailscale/tailscaled.sock \
+        --tun=userspace-networking \
+        --port=41641 &>/dev/null &
+    disown $!
+
+    for _ in 1 2 3 4 5; do
+        [ -S /var/run/tailscale/tailscaled.sock ] && break
+        sleep 1
+    done
+    echo "==> tailscaled restarted."
+}
+
 # --- Cleanup ---
 cleanup() {
     echo "Cleaning up build directory..."
@@ -98,14 +164,29 @@ cleanup() {
 
 # --- Main ---
 check_prereqs
-clone_source
-apply_patch
-build_binary
-cleanup
 
-echo ""
-echo "Done! Install with:"
-echo "  cp $OUTPUT_DIR/tailscaled /usr/sbin/tailscaled"
-echo ""
-echo "Start with:"
-echo "  start-tailscaled &"
+if [ "$UPGRADE_MODE" = true ]; then
+    echo "===== Full Upgrade Mode ====="
+    upgrade_cli
+    clone_source
+    apply_patch
+    build_binary
+    install_binary
+    hold_package
+    restart_daemon
+    cleanup
+    echo ""
+    echo "===== Upgrade complete! ====="
+    tailscale status 2>&1 | head -1
+else
+    clone_source
+    apply_patch
+    build_binary
+    cleanup
+    echo ""
+    echo "Done! Install with:"
+    echo "  cp $OUTPUT_DIR/tailscaled /usr/sbin/tailscaled"
+    echo ""
+    echo "Start with:"
+    echo "  start-tailscaled &"
+fi

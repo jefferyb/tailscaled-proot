@@ -33,6 +33,10 @@ The `tailscale` CLI client (installed via apt from Tailscale's official repo) an
 -X tailscale.com/version.longStamp=<long> -X tailscale.com/version.shortStamp=<short>
 ```
 
+### Apt Package Hold
+
+The `tailscale` apt package is held (`apt-mark hold tailscale`) to prevent `apt upgrade` from overwriting our patched `/usr/sbin/tailscaled` with the stock Linux binary. Both `install.sh` and `build-tailscaled.sh --upgrade` manage this automatically. If the package is accidentally unheld and upgraded, the stock binary will crash with the netlink error -- just re-run `./install.sh` or `./build-tailscaled.sh --upgrade`.
+
 ### Auto-Start
 
 PRoot-Distro does not support systemd. The daemon auto-starts via a snippet in `~/.bashrc` that checks `pgrep -x tailscaled` before launching. PRoot kills background processes when all sessions exit, so it restarts on next login.
@@ -51,14 +55,20 @@ PRoot-Distro does not support systemd. The daemon auto-starts via a snippet in `
 
 ### Upgrade to a New Tailscale Version
 
-1. The `tailscale` CLI gets updated via apt: `apt update && apt upgrade`
-2. Check the new version: `tailscale version` (note the short and long version strings)
-3. Rebuild: `./build-tailscaled.sh v<NEW_VERSION>` (e.g., `./build-tailscaled.sh v1.98.0`)
-4. If the patch fails to apply, see "Regenerating the Patch" below
-5. Install: `cp tailscaled /usr/sbin/tailscaled`
-6. Restart: kill existing daemon (`pkill tailscaled`), it auto-restarts on next shell or run `start-tailscaled &`
-7. Verify: `tailscale status` should have no version warning
-8. Commit the updated `tailscaled` binary and `tailscale-proot-distro.patch` to this repo
+**Easiest**: `./build-tailscaled.sh --upgrade` handles everything (unhold, apt upgrade, build, install, re-hold, restart).
+
+**Manual steps** (if --upgrade doesn't work or you need more control):
+
+1. `apt-mark unhold tailscale`
+2. `apt update && apt install -y --only-upgrade tailscale`
+3. Check the new version: `tailscale version`
+4. Rebuild: `./build-tailscaled.sh v<NEW_VERSION>` (e.g., `./build-tailscaled.sh v1.98.0`)
+5. If the patch fails to apply, see "Regenerating the Patch" below
+6. Install: `cp tailscaled /usr/sbin/tailscaled`
+7. Re-hold: `apt-mark hold tailscale`
+8. Restart: `pkill tailscaled` -- it auto-restarts on next shell, or run `start-tailscaled &`
+9. Verify: `tailscale status` should have no version warning
+10. Commit the updated `tailscaled` binary and `tailscale-proot-distro.patch` to this repo
 
 ### Regenerating the Patch When It Fails to Apply
 
@@ -112,6 +122,7 @@ Tailscale's `go.mod` specifies the minimum Go version. As of v1.96.2, it require
 - **Stale socket** (`/var/run/tailscale/tailscaled.sock`): If the daemon crashes, the socket file may remain. The auto-start snippet handles this by removing it before launch.
 - **UDP buffer warnings** at daemon startup are cosmetic. They only affect throughput, not functionality.
 - **The `tailscale` CLI binary does NOT need patching** -- only `tailscaled` (the daemon) touches netlink.
+- **`apt upgrade` will break things** if the package isn't held. Always verify with `apt-mark showhold | grep tailscale`. If it's not held, run `apt-mark hold tailscale`.
 - **Binary is ~34MB** and committed to the repo. This is intentional for quick installs without rebuilding.
 
 ## Continuous Improvement

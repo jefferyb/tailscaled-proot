@@ -29,6 +29,12 @@ fi
 cp "$SCRIPT_DIR/tailscaled" /usr/sbin/tailscaled
 chmod +x /usr/sbin/tailscaled
 
+# Hold the apt package so apt upgrade doesn't overwrite our patched binary
+if command -v apt-mark &>/dev/null; then
+    echo "Holding tailscale apt package..."
+    apt-mark hold tailscale 2>/dev/null || true
+fi
+
 # --- Install startup script ---
 echo "Installing start-tailscaled script..."
 cat > /usr/local/bin/start-tailscaled << 'STARTUP'
