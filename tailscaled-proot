@@ -101,20 +101,34 @@ self_update() {
 }
 
 # --- GitHub API helpers ---
+gh_api() {
+    local endpoint="$1"
+    if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+        gh api "$endpoint" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
 fetch_release() {
     local tag="${1:-}"
-    local url
+    local api_path
     if [ -n "$tag" ]; then
         [[ "$tag" == v* ]] || tag="v$tag"
-        url="https://api.github.com/repos/$GITHUB_REPO/releases/tags/$tag"
+        api_path="repos/$GITHUB_REPO/releases/tags/$tag"
     else
-        url="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+        api_path="repos/$GITHUB_REPO/releases/latest"
     fi
 
-    local response http_code
-    response=$(curl -fsSL -w "\n%{http_code}" "$url" 2>/dev/null) || {
+    local response
+    if response=$(gh_api "$api_path"); then
+        echo "$response"
+        return 0
+    fi
+
+    local http_code
+    response=$(curl -sSL -w "\n%{http_code}" "https://api.github.com/$api_path" 2>/dev/null) || {
         err "Failed to fetch release from GitHub."
-        err "URL: $url"
+        err "URL: https://api.github.com/$api_path"
         err "Check your internet connection or try again later."
         exit 1
     }
@@ -122,7 +136,8 @@ fetch_release() {
     response=$(echo "$response" | sed '$d')
 
     if [ "$http_code" = "403" ]; then
-        err "GitHub API rate limit exceeded. Try again in a few minutes."
+        err "GitHub API rate limit exceeded. Try again in a few minutes,"
+        err "or install the GitHub CLI (gh) for authenticated requests."
         exit 1
     elif [ "$http_code" = "404" ]; then
         err "Release '${tag:-latest}' not found."
@@ -146,7 +161,8 @@ get_latest_tag() {
 get_download_url() {
     local release_json="$1"
     local filename="$2"
-    echo "$release_json" | grep '"browser_download_url"' | grep "/${filename}\"" | head -1 | sed 's/.*"browser_download_url": *"//;s/".*//'
+    echo "$release_json" | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' \
+        | grep "/${filename}\"" | head -1 | sed 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"//;s/"//'
 }
 
 # --- Version helpers ---
