@@ -41,12 +41,12 @@ After install, `tailscaled` starts automatically every time you open a PRoot-Dis
 
 ### Option B: Build from Source
 
-Requires Go 1.25+.
+Requires Go 1.26+ (check `go.mod` in the tailscale source for the exact version).
 
 ```bash
 # Install Go if needed
-curl -LO https://go.dev/dl/go1.25.5.linux-arm64.tar.gz
-rm -rf /usr/local/go && tar -C /usr/local -xzf go1.25.5.linux-arm64.tar.gz
+curl -LO https://go.dev/dl/go1.26.1.linux-arm64.tar.gz
+rm -rf /usr/local/go && tar -C /usr/local -xzf go1.26.1.linux-arm64.tar.gz
 export PATH=/usr/local/go/bin:$PATH
 
 # Build and install
@@ -64,7 +64,7 @@ tailscale up \
 
 | File | Description |
 |------|-------------|
-| `tailscaled` | Pre-built binary (aarch64, based on v1.94.2) |
+| `tailscaled` | Pre-built binary (aarch64, GOOS=android) |
 | `tailscale-proot-distro.patch` | Git patch against the tailscale source tree |
 | `build-tailscaled.sh` | Build script: clones tailscale, applies patch, compiles |
 | `install.sh` | Installs binary, startup script, and systemd unit |
@@ -112,7 +112,7 @@ PRoot-Distro does not support systemd (it requires PID 1 + real root). Instead, 
 
 - The `tailscale` CLI binary (client) does **not** need patching -- only `tailscaled` (the daemon) uses netlink
 - Install the stock `tailscale` CLI from the [official Tailscale repo](https://tailscale.com/download/linux) as usual
-- The "client version != server version" warning is harmless
+- The build script auto-stamps the version to match the installed CLI, avoiding "client version != server version" warnings
 - UDP buffer size warnings at startup are cosmetic and only affect throughput
 
 ## Upgrading
