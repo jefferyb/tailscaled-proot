@@ -1,0 +1,216 @@
+name: Build and Release
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # Daily at 6am UTC
+  workflow_dispatch:
+    inputs:
+      tailscale_version:
+        description: "Tailscale version to build (e.g., v1.96.2). Leave empty for latest."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine Tailscale version to build
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.tailscale_version }}" ]; then
+            VERSION="${{ github.event.inputs.tailscale_version }}"
+            [[ "$VERSION" == v* ]] || VERSION="v$VERSION"
+          else
+            VERSION=$(curl -fsSL https://api.github.com/repos/tailscale/tailscale/releases/latest \
+              | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_short=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "Building Tailscale $VERSION"
+
+      - name: Check if release already exists
+        id: check
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if gh release view "$VERSION" &>/dev/null; then
+            echo "Release $VERSION already exists, skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release $VERSION does not exist, building."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clone Tailscale source
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          git clone --depth 1 --branch "${{ steps.version.outputs.version }}" \
+            https://github.com/tailscale/tailscale.git /tmp/tailscale-src
+
+      - name: Determine Go version from source
+        if: steps.check.outputs.should_build == 'true'
+        id: goversion
+        run: |
+          GO_VERSION=$(head -5 /tmp/tailscale-src/go.mod | grep '^go ' | awk '{print $2}')
+          echo "go_version=$GO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Tailscale requires Go $GO_VERSION"
+
+      - name: Set up Go
+        if: steps.check.outputs.should_build == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.goversion.outputs.go_version }}
+
+      - name: Apply patch
+        id: patch
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          cd /tmp/tailscale-src
+          if git apply "${{ github.workspace }}/tailscale-proot-distro.patch"; then
+            echo "Patch applied successfully"
+            echo "patch_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Patch failed to apply against ${{ steps.version.outputs.version }}"
+            echo "patch_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open issue on patch failure
+        if: steps.patch.outputs.patch_ok == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TITLE="Patch failed to apply against Tailscale $VERSION"
+          BODY="The automated build for Tailscale **$VERSION** failed because the patch did not apply cleanly.
+
+          The upstream Tailscale source has likely changed in the files we patch. The patch needs to be regenerated.
+
+          See [AGENTS.md](https://github.com/${{ github.repository }}/blob/main/AGENTS.md#regenerating-the-patch-when-it-fails-to-apply) for instructions.
+
+          This issue was created automatically by the build workflow."
+
+          # Don't create duplicate issues
+          EXISTING=$(gh issue list --search "Patch failed $VERSION" --state open --json number --jq '.[0].number' || true)
+          if [ -z "$EXISTING" ]; then
+            gh issue create --title "$TITLE" --body "$BODY" --label "build-failure"
+          else
+            echo "Issue already exists: #$EXISTING"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail build if patch failed
+        if: steps.patch.outputs.patch_ok == 'false'
+        run: exit 1
+
+      - name: Download official Tailscale static binaries
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          VERSION_SHORT="${{ steps.version.outputs.version_short }}"
+          mkdir -p /tmp/official
+
+          for arch in arm64 amd64 arm; do
+            echo "==> Downloading official tailscale $VERSION_SHORT ($arch)..."
+            curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION_SHORT}_${arch}.tgz" \
+              | tar xz -C /tmp/official
+            cp "/tmp/official/tailscale_${VERSION_SHORT}_${arch}/tailscale" "/tmp/official/tailscale-${arch}"
+            chmod +x "/tmp/official/tailscale-${arch}"
+          done
+
+          echo "==> Official CLI binaries downloaded"
+          ls -la /tmp/official/tailscale-*
+
+      - name: Get version stamps from official binary
+        if: steps.check.outputs.should_build == 'true'
+        id: stamps
+        run: |
+          LONG=$(/tmp/official/tailscale-amd64 version 2>/dev/null | grep 'long version:' | awk '{print $3}')
+          SHORT=$(/tmp/official/tailscale-amd64 version 2>/dev/null | head -1)
+          echo "long=$LONG" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "Version stamps: short=$SHORT long=$LONG"
+
+      - name: Build patched tailscaled for all architectures
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          cd /tmp/tailscale-src
+          LONG="${{ steps.stamps.outputs.long }}"
+          SHORT="${{ steps.stamps.outputs.short }}"
+          LDFLAGS="-X tailscale.com/version.longStamp=$LONG -X tailscale.com/version.shortStamp=$SHORT"
+          mkdir -p /tmp/release
+
+          for arch in arm64 amd64 arm; do
+            echo "==> Building tailscaled ($arch)..."
+            CGO_ENABLED=0 GOOS=android GOARCH="$arch" go build \
+              -ldflags "$LDFLAGS" \
+              -o "/tmp/release/tailscaled-${arch}" \
+              ./cmd/tailscaled
+            echo "    Done: tailscaled-${arch}"
+          done
+
+          # Copy official CLI binaries
+          cp /tmp/official/tailscale-* /tmp/release/
+
+          echo ""
+          echo "==> Release artifacts:"
+          ls -la /tmp/release/
+
+      - name: Verify build
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          echo "==> tailscaled version:"
+          /tmp/release/tailscaled-amd64 --version
+          echo ""
+          echo "==> tailscale CLI version:"
+          /tmp/release/tailscale-amd64 version
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          VERSION_SHORT="${{ steps.version.outputs.version_short }}"
+
+          NOTES="$(cat <<EOF
+          ## Tailscale $VERSION for PRoot-Distro (Termux)
+
+          Patched \`tailscaled\` daemon + official \`tailscale\` CLI for running Tailscale inside PRoot-Distro on Android without root.
+
+          ### Install or update
+
+          \`\`\`bash
+          tailscaled-proot install
+          # or
+          tailscaled-proot update
+          \`\`\`
+
+          See the [README](https://github.com/${{ github.repository }}#quick-start) for first-time setup.
+
+          ### Binaries
+
+          | File | Description |
+          |------|-------------|
+          | \`tailscaled-arm64\` | Patched daemon for aarch64 (most Android devices) |
+          | \`tailscaled-amd64\` | Patched daemon for x86_64 (Chromebooks, emulators) |
+          | \`tailscaled-arm\` | Patched daemon for 32-bit ARM |
+          | \`tailscale-arm64\` | Official CLI for aarch64 |
+          | \`tailscale-amd64\` | Official CLI for x86_64 |
+          | \`tailscale-arm\` | Official CLI for 32-bit ARM |
+
+          ### Changes from upstream
+
+          Built from [tailscale/tailscale@$VERSION](https://github.com/tailscale/tailscale/releases/tag/$VERSION) with our [PRoot-Distro patch](https://github.com/${{ github.repository }}/blob/main/tailscale-proot-distro.patch) applied. No other modifications.
+          EOF
+          )"
+
+          gh release create "$VERSION" \
+            --title "Tailscale $VERSION_SHORT" \
+            --notes "$NOTES" \
+            /tmp/release/*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
