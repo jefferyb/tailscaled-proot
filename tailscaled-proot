@@ -21,6 +21,7 @@ set -euo pipefail
 
 GITHUB_REPO="jefferyb/tailscaled-proot"
 SCRIPT_VERSION="1.0.0"
+SCRIPT_URL="https://raw.githubusercontent.com/$GITHUB_REPO/main/tailscaled-proot"
 INSTALL_DIR="/usr/local/bin"
 STATE_DIR="/var/lib/tailscale"
 SOCKET_DIR="/var/run/tailscale"
@@ -44,6 +45,57 @@ check_requirements() {
         err "Install it with: apt install -y curl"
         exit 1
     fi
+}
+
+# --- Self-update ---
+get_remote_script_version() {
+    curl -fsSL "$SCRIPT_URL" 2>/dev/null | grep -m1 '^SCRIPT_VERSION=' | sed 's/SCRIPT_VERSION="//;s/"//'
+}
+
+self_update() {
+    local remote_version
+    remote_version=$(get_remote_script_version 2>/dev/null) || {
+        warn "Could not check for script updates"
+        return 1
+    }
+
+    if [ -z "$remote_version" ]; then
+        warn "Could not determine remote script version"
+        return 1
+    fi
+
+    if [ "$SCRIPT_VERSION" = "$remote_version" ]; then
+        ok "tailscaled-proot script is up to date ($SCRIPT_VERSION)"
+        return 0
+    fi
+
+    info "Updating tailscaled-proot script: $SCRIPT_VERSION → $remote_version"
+    local tmp_script
+    tmp_script=$(mktemp)
+    if curl -fsSL -o "$tmp_script" "$SCRIPT_URL" 2>/dev/null; then
+        local script_path
+        script_path=$(realpath "$0" 2>/dev/null || echo "$INSTALL_DIR/tailscaled-proot")
+        cp "$tmp_script" "$script_path"
+        chmod +x "$script_path"
+        rm -f "$tmp_script"
+        ok "Script updated to $remote_version"
+        return 0
+    else
+        rm -f "$tmp_script"
+        warn "Failed to download script update"
+        return 1
+    fi
+}
+
+check_script_update_available() {
+    local remote_version
+    remote_version=$(get_remote_script_version 2>/dev/null) || return 1
+    if [ -n "$remote_version" ] && [ "$SCRIPT_VERSION" != "$remote_version" ]; then
+        warn "Script update available: $SCRIPT_VERSION → $remote_version"
+        info "Run: tailscaled-proot update"
+        return 0
+    fi
+    return 1
 }
 
 # --- GitHub API helpers ---
@@ -316,22 +368,25 @@ cmd_update() {
     echo "  tailscaled-proot updater"
     echo "  ========================"
 
-    TOTAL_STEPS=5
+    TOTAL_STEPS=6
 
     if [ ! -x "$INSTALL_DIR/tailscaled" ]; then
         err "tailscaled-proot is not installed. Run: tailscaled-proot install"
         exit 1
     fi
 
+    step 1 "Checking for script updates"
+    self_update
+
     local arch
     arch=$(detect_arch)
     local current
     current=$(installed_daemon_version)
 
-    step 1 "Checking versions"
+    step 2 "Checking binary versions"
     info "Installed: $current"
 
-    step 2 "Fetching latest release"
+    step 3 "Fetching latest release"
     local release_json latest_tag
     release_json=$(get_latest_release)
     latest_tag=$(get_latest_tag "$release_json")
@@ -356,7 +411,7 @@ cmd_update() {
         exit 1
     fi
 
-    step 3 "Downloading binaries"
+    step 4 "Downloading binaries"
     local tmp
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
@@ -367,14 +422,14 @@ cmd_update() {
     info "Downloading tailscaled (daemon)..."
     download "$tailscaled_url" "$tmp/tailscaled"
 
-    step 4 "Installing"
+    step 5 "Installing"
     stop_daemon
     cp "$tmp/tailscale" "$INSTALL_DIR/tailscale"
     cp "$tmp/tailscaled" "$INSTALL_DIR/tailscaled"
     chmod +x "$INSTALL_DIR/tailscale" "$INSTALL_DIR/tailscaled"
     ok "Binaries updated"
 
-    step 5 "Restarting daemon"
+    step 6 "Restarting daemon"
     start_daemon
 
     echo ""
@@ -439,21 +494,39 @@ cmd_status() {
     fi
 
     # Check for updates
-    if command -v curl &>/dev/null && [ "$daemon_ver" != "not installed" ]; then
+    if command -v curl &>/dev/null; then
         echo ""
         info "Checking for updates..."
-        local release_json latest_tag
-        if release_json=$(get_latest_release 2>/dev/null); then
-            latest_tag=$(get_latest_tag "$release_json")
-            local latest_ver="${latest_tag#v}"
-            if [ "$daemon_ver" = "$latest_ver" ]; then
-                ok "Up to date ($daemon_ver)"
-            else
-                warn "Update available: $daemon_ver → $latest_ver"
-                info "Run: tailscaled-proot update"
-            fi
+
+        # Script updates
+        local remote_script_ver
+        remote_script_ver=$(get_remote_script_version 2>/dev/null) || true
+        if [ -n "$remote_script_ver" ] && [ "$SCRIPT_VERSION" != "$remote_script_ver" ]; then
+            warn "Script update: $SCRIPT_VERSION → $remote_script_ver"
         else
-            warn "Could not check for updates"
+            ok "Script up to date ($SCRIPT_VERSION)"
+        fi
+
+        # Binary updates
+        if [ "$daemon_ver" != "not installed" ]; then
+            local release_json latest_tag
+            if release_json=$(get_latest_release 2>/dev/null); then
+                latest_tag=$(get_latest_tag "$release_json")
+                local latest_ver="${latest_tag#v}"
+                if [ "$daemon_ver" = "$latest_ver" ]; then
+                    ok "Binaries up to date ($daemon_ver)"
+                else
+                    warn "Binary update: $daemon_ver → $latest_ver"
+                fi
+            else
+                warn "Could not check for binary updates"
+            fi
+        fi
+
+        if [ -n "$remote_script_ver" ] && [ "$SCRIPT_VERSION" != "$remote_script_ver" ] || \
+           { [ -n "${latest_ver:-}" ] && [ "$daemon_ver" != "${latest_ver:-}" ]; }; then
+            echo ""
+            info "Run: tailscaled-proot update"
         fi
     fi
     echo ""
