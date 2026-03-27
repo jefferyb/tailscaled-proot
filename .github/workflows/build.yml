@@ -109,29 +109,35 @@ jobs:
         if: steps.patch.outputs.patch_ok == 'false'
         run: exit 1
 
-      - name: Download official Tailscale static binaries
+      - name: Download official Tailscale CLI (arm64)
         if: steps.check.outputs.should_build == 'true'
         run: |
           VERSION_SHORT="${{ steps.version.outputs.version_short }}"
           mkdir -p /tmp/official
 
-          for arch in arm64 amd64 arm; do
-            echo "==> Downloading official tailscale $VERSION_SHORT ($arch)..."
-            curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION_SHORT}_${arch}.tgz" \
-              | tar xz -C /tmp/official
-            cp "/tmp/official/tailscale_${VERSION_SHORT}_${arch}/tailscale" "/tmp/official/tailscale-${arch}"
-            chmod +x "/tmp/official/tailscale-${arch}"
-          done
+          echo "==> Downloading official tailscale $VERSION_SHORT (arm64)..."
+          curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION_SHORT}_arm64.tgz" \
+            | tar xz -C /tmp/official
+          cp "/tmp/official/tailscale_${VERSION_SHORT}_arm64/tailscale" "/tmp/official/tailscale-arm64"
+          chmod +x "/tmp/official/tailscale-arm64"
 
-          echo "==> Official CLI binaries downloaded"
+          # Also grab amd64 temporarily so we can run it on this x86_64 runner
+          # to extract exact version stamps
+          echo "==> Downloading official tailscale $VERSION_SHORT (amd64) for version stamps..."
+          curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION_SHORT}_amd64.tgz" \
+            | tar xz -C /tmp/official
+          cp "/tmp/official/tailscale_${VERSION_SHORT}_amd64/tailscale" "/tmp/official/tailscale-amd64-tmp"
+          chmod +x "/tmp/official/tailscale-amd64-tmp"
+
           ls -la /tmp/official/tailscale-*
 
       - name: Get version stamps from official binary
         if: steps.check.outputs.should_build == 'true'
         id: stamps
         run: |
-          LONG=$(/tmp/official/tailscale-amd64 version 2>/dev/null | grep 'long version:' | awk '{print $3}')
-          SHORT=$(/tmp/official/tailscale-amd64 version 2>/dev/null | head -1)
+          LONG=$(/tmp/official/tailscale-amd64-tmp version 2>/dev/null | grep 'long version:' | awk '{print $3}')
+          SHORT=$(/tmp/official/tailscale-amd64-tmp version 2>/dev/null | head -1)
+          rm -f /tmp/official/tailscale-amd64-tmp
           echo "long=$LONG" >> "$GITHUB_OUTPUT"
           echo "short=$SHORT" >> "$GITHUB_OUTPUT"
           echo "Version stamps: short=$SHORT long=$LONG"
@@ -155,8 +161,8 @@ jobs:
             ./cmd/tailscaled
           echo "    Done: tailscaled-arm64"
 
-          # Copy official CLI binaries
-          cp /tmp/official/tailscale-* /tmp/release/
+          # Copy official CLI binary (arm64 only)
+          cp /tmp/official/tailscale-arm64 /tmp/release/
 
           echo ""
           echo "==> Release artifacts:"
@@ -165,11 +171,14 @@ jobs:
       - name: Verify build
         if: steps.check.outputs.should_build == 'true'
         run: |
-          echo "==> tailscale CLI version (amd64, runs on this runner):"
-          /tmp/release/tailscale-amd64 version
+          echo "==> Release artifacts:"
+          ls -la /tmp/release/
           echo ""
           echo "==> Patched daemon binary:"
           file /tmp/release/tailscaled-arm64
+          echo ""
+          echo "==> Official CLI binary:"
+          file /tmp/release/tailscale-arm64
 
       - name: Create GitHub Release
         if: steps.check.outputs.should_build == 'true'
@@ -196,10 +205,8 @@ jobs:
 
           | File | Description |
           |------|-------------|
-          | \`tailscaled-arm64\` | Patched daemon for aarch64 (most Android devices) |
-          | \`tailscale-arm64\` | Official CLI for aarch64 |
-          | \`tailscale-amd64\` | Official CLI for x86_64 |
-          | \`tailscale-arm\` | Official CLI for 32-bit ARM |
+          | \`tailscaled-arm64\` | Patched daemon for aarch64 |
+          | \`tailscale-arm64\` | Official Tailscale CLI for aarch64 |
 
           ### Changes from upstream
 
