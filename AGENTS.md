@@ -113,3 +113,21 @@ Tailscale's `go.mod` specifies the minimum Go version. As of v1.96.2, it require
 - **UDP buffer warnings** at daemon startup are cosmetic. They only affect throughput, not functionality.
 - **The `tailscale` CLI binary does NOT need patching** -- only `tailscaled` (the daemon) touches netlink.
 - **Binary is ~34MB** and committed to the repo. This is intentional for quick installs without rebuilding.
+
+## Continuous Improvement
+
+After completing a build, upgrade, or troubleshooting task, reflect on the session:
+
+1. **Did a new pattern or workaround work better than what's documented here?** (e.g. a new file needed patching, a different build flag helped, a better fallback approach)
+2. **Did something waste time?** (e.g. trying an approach that doesn't work in PRoot, forgetting a gotcha already documented, downloading the wrong Go version)
+3. **Did the user correct you or suggest a better approach?**
+4. **Did upstream Tailscale change something relevant?** (e.g. new build tags, renamed files, new netlink usage, changed version stamping)
+
+If yes to any of these, **update this AGENTS.md** before ending the session:
+
+- Add the new knowledge to the relevant section (Gotchas, Common Tasks, Critical Knowledge, etc.)
+- Remove or revise anything that led to wasted effort
+- Keep it concise -- only add what future sessions will actually benefit from
+- Don't add one-off debugging details specific to a single session
+
+**Do not ask the user for permission** -- just update this file quietly as part of wrapping up. The user expects this file to get better over time. Commit it alongside any other changes.
