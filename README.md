@@ -1,33 +1,18 @@
-# tailscaled on Termux (PRoot-Distro)
+# tailscaled-proot
 
-Run `tailscaled` inside a PRoot-Distro environment on Android (Termux) with Headscale or Tailscale, including SSH server support.
+Run Tailscale (with SSH server + Taildrop) inside PRoot-Distro on Android without root.
 
-## The Problem
-
-The standard Linux `tailscaled` binary crashes in PRoot-Distro with:
-
-```
-netmon.New: route ip+net: netlinkrib: permission denied
-```
-
-Android SDK 30+ blocks `bind()` on `NETLINK_ROUTE` sockets. Go's `net.Interfaces()` depends on netlink, so `tailscaled` (compiled with `GOOS=linux`) fails immediately at startup.
-
-## The Solution
-
-This repo contains a patched build of `tailscaled` that:
-
-1. **Builds with `GOOS=android`** -- uses a polling-based network monitor instead of the netlink-based one
-2. **Falls back to `ifconfig` parsing** -- when `net.Interfaces()` fails, interface info is read from `ifconfig` output instead
-3. **Enables SSH server on Android** -- removes `!android` build tag restrictions from the SSH server code
-4. **Enables Taildrop file operations** -- removes the `!android` build tag from the filesystem-based file ops
+The stock `tailscaled` crashes in PRoot because Android blocks netlink sockets. This project provides patched binaries that work around that, built automatically for every new Tailscale release.
 
 ## Quick Start
 
-### Option A: Use the Pre-built Binary
-
 ```bash
-# Install (binary + auto-start in ~/.bashrc)
-./install.sh
+# Download the installer
+curl -fsSL https://raw.githubusercontent.com/jefferyb/tailscaled-proot/main/tailscaled-proot \
+  -o /usr/local/bin/tailscaled-proot && chmod +x /usr/local/bin/tailscaled-proot
+
+# Install (downloads both tailscale CLI + patched daemon, sets up auto-start)
+tailscaled-proot install
 
 # Connect to your network (only needed once)
 tailscale up \
@@ -37,41 +22,64 @@ tailscale up \
   --authkey "YOUR_AUTHKEY"
 ```
 
-After install, `tailscaled` starts automatically every time you open a PRoot-Distro shell. No manual steps needed.
+That's it. The daemon starts automatically every time you open a PRoot-Distro shell.
 
-### Option B: Build from Source
-
-Requires Go 1.26+ (check `go.mod` in the tailscale source for the exact version).
+## Updating
 
 ```bash
-# Install Go if needed
-curl -LO https://go.dev/dl/go1.26.1.linux-arm64.tar.gz
-rm -rf /usr/local/go && tar -C /usr/local -xzf go1.26.1.linux-arm64.tar.gz
-export PATH=/usr/local/go/bin:$PATH
-
-# Build and install
-./install.sh --build
-
-# Connect to your network (only needed once)
-tailscale up \
-  --login-server https://headscale.example.com:443 \
-  --ssh \
-  --hostname my-device \
-  --authkey "YOUR_AUTHKEY"
+tailscaled-proot update
 ```
 
-## What's in This Repo
+Checks GitHub for the latest release, downloads matching binaries, and restarts the daemon. Skips if already up to date.
 
-| File | Description |
-|------|-------------|
-| `tailscaled` | Pre-built binary (aarch64, GOOS=android) |
-| `tailscale-proot-distro.patch` | Git patch against the tailscale source tree |
-| `build-tailscaled.sh` | Build script: clones tailscale, applies patch, compiles |
-| `install.sh` | Installs binary, startup script, and systemd unit |
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `tailscaled-proot install` | Download and install both binaries, configure auto-start, start daemon |
+| `tailscaled-proot update` | Update to the latest version |
+| `tailscaled-proot status` | Show versions, daemon status, and check for updates |
+| `tailscaled-proot uninstall` | Remove binaries and auto-start (preserves Tailscale state) |
+| `tailscaled-proot help` | Show help |
+
+## How It Works
+
+This project distributes patched `tailscaled` binaries that:
+
+1. **Build with `GOOS=android`** -- uses a polling-based network monitor instead of netlink
+2. **Fall back to `ifconfig` parsing** -- when Go's `net.Interfaces()` fails (netlink blocked), interface info is read from `ifconfig` output
+3. **Enable SSH server on Android** -- removes `!android` build tag restrictions
+4. **Enable Taildrop file operations** -- removes the `!android` build tag from filesystem-based file ops
+
+Binaries are built automatically via GitHub Actions whenever Tailscale publishes a new release.
+
+## Alternative: dpkg-divert (for existing apt installs)
+
+If you already have the `tailscale` apt package installed and prefer to keep managing the CLI through apt, you can use `dpkg-divert` to protect just the daemon binary:
+
+```bash
+# Tell dpkg to never overwrite /usr/sbin/tailscaled
+dpkg-divert --add --rename --divert /usr/sbin/tailscaled.stock /usr/sbin/tailscaled
+
+# Download and install just the patched daemon
+curl -fsSL https://github.com/jefferyb/tailscaled-proot/releases/latest/download/tailscaled-arm64 \
+  -o /usr/sbin/tailscaled && chmod +x /usr/sbin/tailscaled
+```
+
+With this approach:
+- `apt upgrade` updates the CLI freely but the stock daemon goes to `/usr/sbin/tailscaled.stock`
+- Your patched daemon at `/usr/sbin/tailscaled` stays untouched
+- **You still need to manually download the matching patched daemon** after each CLI update to avoid version mismatch warnings
+
+To undo:
+```bash
+rm /usr/sbin/tailscaled
+dpkg-divert --remove --rename /usr/sbin/tailscaled
+```
 
 ## What the Patch Changes
 
-10 files modified across the tailscale source:
+10 files modified across the Tailscale source:
 
 | File | Change |
 |------|--------|
@@ -86,69 +94,30 @@ tailscale up \
 | `ssh/tailssh/auditd_linux.go` | Include `android` in SSH build tags |
 | `feature/taildrop/fileops_fs.go` | Use filesystem file ops on `android` |
 
-## Installed Files
+## Building from Source
 
-After running `install.sh`:
+If you prefer to build yourself instead of using the pre-built binaries:
 
-| Path | Description |
-|------|-------------|
-| `/usr/sbin/tailscaled` | Patched tailscaled binary |
-| `/usr/local/bin/start-tailscaled` | Manual startup script (userspace-networking mode) |
-| `/etc/systemd/system/tailscaled-proot.service` | Systemd unit (for environments where systemd is PID 1) |
-| `~/.bashrc` (appended) | Auto-start snippet that launches tailscaled on login |
+```bash
+# Requires Go 1.26+ (check go.mod in tailscale source for exact version)
+./build-tailscaled.sh v1.96.2
+```
 
-## Auto-Start Behavior
-
-PRoot-Distro does not support systemd (it requires PID 1 + real root). Instead, the installer appends a snippet to `~/.bashrc` that:
-
-- Checks if `tailscaled` is already running (via `pgrep`)
-- If not running: cleans any stale socket, starts the daemon in the background, waits for it to be ready
-- If already running: does nothing (no duplicate processes)
-- Runs silently with no terminal output
-
-**Note:** PRoot kills background processes when you exit the last session. `tailscaled` will automatically restart on your next login.
+See [AGENTS.md](AGENTS.md) for detailed build and patch regeneration instructions.
 
 ## Notes
 
-- The `tailscale` CLI binary (client) does **not** need patching -- only `tailscaled` (the daemon) uses netlink
-- Install the stock `tailscale` CLI from the [official Tailscale repo](https://tailscale.com/download/linux) as usual
-- The build script auto-stamps the version to match the installed CLI, avoiding "client version != server version" warnings
-- UDP buffer size warnings at startup are cosmetic and only affect throughput
-
-## Upgrading
-
-The `tailscale` apt package is held (`apt-mark hold`) after install to prevent `apt upgrade` from overwriting our patched `tailscaled` binary. To upgrade to a new version:
-
-### One-command upgrade
-
-```bash
-./build-tailscaled.sh --upgrade
-```
-
-This automatically: unholds the apt package, upgrades the `tailscale` CLI, rebuilds our patched `tailscaled` to match, installs it, re-holds the package, and restarts the daemon.
-
-### Manual upgrade
-
-```bash
-# 1. Unhold and upgrade the CLI
-apt-mark unhold tailscale
-apt update && apt install -y --only-upgrade tailscale
-
-# 2. Rebuild to match the new version
-./build-tailscaled.sh v1.XX.X
-
-# 3. Install and re-hold
-cp tailscaled /usr/sbin/tailscaled
-apt-mark hold tailscale
-
-# 4. Restart
-pkill tailscaled  # auto-restarts on next shell, or run start-tailscaled &
-```
-
-The patch may need minor adjustments if upstream changes the patched files significantly. See `AGENTS.md` for regeneration instructions.
+- **No root required** -- runs entirely in userspace via PRoot-Distro
+- `--tun=userspace-networking` is used since PRoot has no kernel TUN access
+- UDP buffer size warnings at startup are cosmetic
+- Works with both [Tailscale](https://tailscale.com) and [Headscale](https://github.com/juanfont/headscale)
 
 ## Background
 
 - [Go issue #40569](https://github.com/golang/go/issues/40569) -- `net.Interfaces()` broken on Android SDK 30+
-- [Tailscale PR #15518](https://github.com/tailscale/tailscale/pull/15518) -- Stop trying to use netlink on android
+- [Tailscale PR #15518](https://github.com/tailscale/tailscale/pull/15518) -- Stop trying to use netlink on Android
 - [Tailscale issue #9836](https://github.com/tailscale/tailscale/issues/9836) -- Starting tsnet server on Android fails
+
+## License
+
+The Tailscale source code is licensed under [BSD-3-Clause](LICENSE). This project is not affiliated with or endorsed by Tailscale Inc. "Tailscale" is a registered trademark of Tailscale Inc.

@@ -1,0 +1,454 @@
+#!/bin/bash
+# tailscaled-proot - Install and manage a patched Tailscale daemon for PRoot-Distro (Termux)
+#
+# Usage:
+#   tailscaled-proot install     Install tailscale + tailscaled and set up auto-start
+#   tailscaled-proot update      Update to the latest version
+#   tailscaled-proot status      Show current versions and daemon status
+#   tailscaled-proot uninstall   Remove tailscale, tailscaled, and auto-start
+#   tailscaled-proot help        Show this help message
+
+set -euo pipefail
+
+GITHUB_REPO="jefferyb/tailscaled-proot"
+INSTALL_DIR="/usr/local/bin"
+STATE_DIR="/var/lib/tailscale"
+SOCKET_DIR="/var/run/tailscale"
+SOCKET="$SOCKET_DIR/tailscaled.sock"
+BASHRC="${HOME}/.bashrc"
+BASHRC_MARKER="# --- tailscaled-proot auto-start ---"
+
+# --- Output helpers ---
+info()  { echo -e "  \033[1;34m→\033[0m $*"; }
+ok()    { echo -e "  \033[1;32m✓\033[0m $*"; }
+warn()  { echo -e "  \033[1;33m!\033[0m $*"; }
+err()   { echo -e "  \033[1;31m✗\033[0m $*" >&2; }
+step()  { echo -e "\n\033[1m[$1/$TOTAL_STEPS]\033[0m $2"; }
+
+# --- GitHub API helpers ---
+get_latest_release() {
+    local url="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+    local response
+    response=$(curl -fsSL "$url" 2>/dev/null) || {
+        err "Failed to fetch latest release from GitHub"
+        err "URL: $url"
+        exit 1
+    }
+    echo "$response"
+}
+
+get_latest_tag() {
+    local release_json="$1"
+    echo "$release_json" | grep -m1 '"tag_name"' | sed 's/.*"tag_name": *"//;s/".*//'
+}
+
+get_download_url() {
+    local release_json="$1"
+    local filename="$2"
+    echo "$release_json" | grep '"browser_download_url"' | grep "$filename" | head -1 | sed 's/.*"browser_download_url": *"//;s/".*//'
+}
+
+# --- Version helpers ---
+installed_version() {
+    if [ -x "$INSTALL_DIR/tailscaled" ]; then
+        "$INSTALL_DIR/tailscaled" --version 2>/dev/null | head -1
+    else
+        echo "not installed"
+    fi
+}
+
+running_version() {
+    if pgrep -x tailscaled &>/dev/null; then
+        tailscale version 2>/dev/null | head -1 || echo "unknown"
+    else
+        echo "not running"
+    fi
+}
+
+# --- Daemon management ---
+stop_daemon() {
+    if pgrep -x tailscaled &>/dev/null; then
+        info "Stopping tailscaled..."
+        pkill tailscaled 2>/dev/null || true
+        sleep 1
+        ok "Stopped"
+    fi
+}
+
+start_daemon() {
+    info "Starting tailscaled..."
+    rm -f "$SOCKET"
+    mkdir -p "$SOCKET_DIR" "$STATE_DIR"
+    "$INSTALL_DIR/tailscaled" \
+        --state="$STATE_DIR/tailscaled.state" \
+        --socket="$SOCKET" \
+        --tun=userspace-networking \
+        --port=41641 &>/dev/null &
+    disown $!
+
+    local tries=0
+    while [ $tries -lt 5 ]; do
+        [ -S "$SOCKET" ] && break
+        sleep 1
+        tries=$((tries + 1))
+    done
+
+    if [ -S "$SOCKET" ]; then
+        ok "Started"
+    else
+        warn "Daemon may still be starting up (socket not ready yet)"
+    fi
+}
+
+# --- Auto-start management ---
+install_autostart() {
+    if [ -f "$BASHRC" ] && grep -qF "$BASHRC_MARKER" "$BASHRC"; then
+        ok "Auto-start already configured in ~/.bashrc"
+        return
+    fi
+
+    info "Adding auto-start to ~/.bashrc..."
+    cat >> "$BASHRC" << 'SNIPPET'
+
+# --- tailscaled-proot auto-start ---
+if command -v tailscaled &>/dev/null && ! pgrep -x tailscaled &>/dev/null; then
+    mkdir -p /var/run/tailscale /var/lib/tailscale
+    rm -f /var/run/tailscale/tailscaled.sock
+    tailscaled \
+        --state=/var/lib/tailscale/tailscaled.state \
+        --socket=/var/run/tailscale/tailscaled.sock \
+        --tun=userspace-networking \
+        --port=41641 &>/dev/null &
+    disown $!
+    for _ in 1 2 3 4 5; do
+        [ -S /var/run/tailscale/tailscaled.sock ] && break
+        sleep 1
+    done
+fi
+# --- end tailscaled-proot ---
+SNIPPET
+    ok "Auto-start configured"
+}
+
+remove_autostart() {
+    if [ -f "$BASHRC" ] && grep -qF "$BASHRC_MARKER" "$BASHRC"; then
+        info "Removing auto-start from ~/.bashrc..."
+        sed -i "/^$BASHRC_MARKER$/,/^# --- end tailscaled-proot ---$/d" "$BASHRC"
+        ok "Auto-start removed"
+    else
+        ok "No auto-start found in ~/.bashrc"
+    fi
+}
+
+# --- Detect architecture ---
+detect_arch() {
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        aarch64|arm64) echo "arm64" ;;
+        x86_64|amd64)  echo "amd64" ;;
+        armv7l|armhf)  echo "arm" ;;
+        *)
+            err "Unsupported architecture: $arch"
+            exit 1
+            ;;
+    esac
+}
+
+# --- Download a file with progress ---
+download() {
+    local url="$1"
+    local dest="$2"
+    if ! curl -fSL --progress-bar -o "$dest" "$url"; then
+        err "Download failed: $url"
+        exit 1
+    fi
+}
+
+# --- Commands ---
+
+cmd_install() {
+    echo ""
+    echo "  tailscaled-proot installer"
+    echo "  =========================="
+
+    TOTAL_STEPS=6
+    local arch
+    arch=$(detect_arch)
+
+    step 1 "Detecting environment"
+    info "Architecture: $arch"
+    info "Install directory: $INSTALL_DIR"
+    if [ -x "$INSTALL_DIR/tailscaled" ]; then
+        warn "Existing installation found: $(installed_version)"
+        warn "Will be replaced"
+    fi
+
+    step 2 "Fetching latest release"
+    local release_json latest_tag
+    release_json=$(get_latest_release)
+    latest_tag=$(get_latest_tag "$release_json")
+    ok "Latest release: $latest_tag"
+
+    local tailscale_url tailscaled_url
+    tailscale_url=$(get_download_url "$release_json" "tailscale-${arch}$")
+    tailscaled_url=$(get_download_url "$release_json" "tailscaled-${arch}$")
+
+    if [ -z "$tailscale_url" ] || [ -z "$tailscaled_url" ]; then
+        err "Could not find binaries for $arch in release $latest_tag"
+        err "Available assets:"
+        echo "$release_json" | grep '"browser_download_url"' | sed 's/.*"browser_download_url": *"//;s/".*//' | while read -r u; do err "  $u"; done
+        exit 1
+    fi
+
+    step 3 "Downloading binaries"
+    local tmp
+    tmp=$(mktemp -d)
+    trap "rm -rf $tmp" EXIT
+
+    info "Downloading tailscale (CLI)..."
+    download "$tailscale_url" "$tmp/tailscale"
+
+    info "Downloading tailscaled (daemon)..."
+    download "$tailscaled_url" "$tmp/tailscaled"
+
+    step 4 "Installing"
+    stop_daemon
+    mkdir -p "$INSTALL_DIR"
+    cp "$tmp/tailscale" "$INSTALL_DIR/tailscale"
+    cp "$tmp/tailscaled" "$INSTALL_DIR/tailscaled"
+    chmod +x "$INSTALL_DIR/tailscale" "$INSTALL_DIR/tailscaled"
+    ok "Installed tailscale to $INSTALL_DIR/tailscale"
+    ok "Installed tailscaled to $INSTALL_DIR/tailscaled"
+
+    # Remove the official apt package if installed to avoid conflicts
+    if dpkg -l tailscale 2>/dev/null | grep -q '^ii'; then
+        info "Removing conflicting apt package 'tailscale'..."
+        apt-get remove -y tailscale &>/dev/null || true
+        ok "Apt package removed (our binaries in $INSTALL_DIR take precedence)"
+    fi
+
+    step 5 "Configuring auto-start"
+    install_autostart
+
+    step 6 "Starting daemon"
+    start_daemon
+
+    echo ""
+    echo "  =========================="
+    ok "Installation complete! ($(installed_version))"
+    echo ""
+    info "Next steps:"
+    echo "    tailscale up \\"
+    echo "      --login-server https://YOUR_SERVER:443 \\"
+    echo "      --ssh \\"
+    echo "      --hostname YOUR_HOSTNAME \\"
+    echo "      --authkey YOUR_AUTHKEY"
+    echo ""
+    info "The daemon will auto-start every time you open a PRoot-Distro shell."
+    echo ""
+}
+
+cmd_update() {
+    echo ""
+    echo "  tailscaled-proot updater"
+    echo "  ========================"
+
+    TOTAL_STEPS=5
+
+    if [ ! -x "$INSTALL_DIR/tailscaled" ]; then
+        err "tailscaled-proot is not installed. Run: tailscaled-proot install"
+        exit 1
+    fi
+
+    local arch
+    arch=$(detect_arch)
+    local current
+    current=$(installed_version)
+
+    step 1 "Checking versions"
+    info "Installed: $current"
+
+    step 2 "Fetching latest release"
+    local release_json latest_tag
+    release_json=$(get_latest_release)
+    latest_tag=$(get_latest_tag "$release_json")
+    local latest_ver="${latest_tag#v}"
+    ok "Latest: $latest_tag"
+
+    if [ "$current" = "$latest_ver" ]; then
+        echo ""
+        ok "Already up to date! ($current)"
+        echo ""
+        return
+    fi
+
+    info "Update available: $current → $latest_ver"
+
+    local tailscale_url tailscaled_url
+    tailscale_url=$(get_download_url "$release_json" "tailscale-${arch}$")
+    tailscaled_url=$(get_download_url "$release_json" "tailscaled-${arch}$")
+
+    if [ -z "$tailscale_url" ] || [ -z "$tailscaled_url" ]; then
+        err "Could not find binaries for $arch in release $latest_tag"
+        exit 1
+    fi
+
+    step 3 "Downloading binaries"
+    local tmp
+    tmp=$(mktemp -d)
+    trap "rm -rf $tmp" EXIT
+
+    info "Downloading tailscale (CLI)..."
+    download "$tailscale_url" "$tmp/tailscale"
+
+    info "Downloading tailscaled (daemon)..."
+    download "$tailscaled_url" "$tmp/tailscaled"
+
+    step 4 "Installing"
+    stop_daemon
+    cp "$tmp/tailscale" "$INSTALL_DIR/tailscale"
+    cp "$tmp/tailscaled" "$INSTALL_DIR/tailscaled"
+    chmod +x "$INSTALL_DIR/tailscale" "$INSTALL_DIR/tailscaled"
+    ok "Binaries updated"
+
+    step 5 "Restarting daemon"
+    start_daemon
+
+    echo ""
+    echo "  ========================"
+    ok "Updated to $(installed_version)"
+    echo ""
+}
+
+cmd_status() {
+    echo ""
+    echo "  tailscaled-proot status"
+    echo "  ======================="
+    echo ""
+
+    # Installed versions
+    if [ -x "$INSTALL_DIR/tailscale" ]; then
+        ok "tailscale (CLI):    $(installed_version)"
+    else
+        err "tailscale (CLI):    not installed"
+    fi
+
+    if [ -x "$INSTALL_DIR/tailscaled" ]; then
+        ok "tailscaled (daemon): $(installed_version)"
+    else
+        err "tailscaled (daemon): not installed"
+    fi
+
+    # Running status
+    echo ""
+    if pgrep -x tailscaled &>/dev/null; then
+        ok "Daemon: running (PID $(pgrep -x tailscaled | head -1))"
+    else
+        warn "Daemon: not running"
+    fi
+
+    # Socket
+    if [ -S "$SOCKET" ]; then
+        ok "Socket: $SOCKET"
+    else
+        warn "Socket: not found"
+    fi
+
+    # Auto-start
+    if [ -f "$BASHRC" ] && grep -qF "$BASHRC_MARKER" "$BASHRC"; then
+        ok "Auto-start: configured"
+    else
+        warn "Auto-start: not configured"
+    fi
+
+    # Tailscale network status
+    echo ""
+    if pgrep -x tailscaled &>/dev/null && [ -S "$SOCKET" ]; then
+        info "Network status:"
+        tailscale status 2>&1 | sed 's/^/    /'
+    fi
+
+    # Check for updates
+    echo ""
+    info "Checking for updates..."
+    local release_json latest_tag
+    release_json=$(get_latest_release 2>/dev/null) && {
+        latest_tag=$(get_latest_tag "$release_json")
+        local latest_ver="${latest_tag#v}"
+        local current
+        current=$(installed_version)
+        if [ "$current" = "$latest_ver" ]; then
+            ok "Up to date ($current)"
+        else
+            warn "Update available: $current → $latest_ver"
+            info "Run: tailscaled-proot update"
+        fi
+    } || {
+        warn "Could not check for updates"
+    }
+    echo ""
+}
+
+cmd_uninstall() {
+    echo ""
+    echo "  tailscaled-proot uninstaller"
+    echo "  ============================"
+
+    TOTAL_STEPS=3
+
+    step 1 "Stopping daemon"
+    stop_daemon
+
+    step 2 "Removing files"
+    for bin in tailscale tailscaled; do
+        if [ -f "$INSTALL_DIR/$bin" ]; then
+            rm -f "$INSTALL_DIR/$bin"
+            ok "Removed $INSTALL_DIR/$bin"
+        fi
+    done
+
+    step 3 "Removing auto-start"
+    remove_autostart
+
+    echo ""
+    echo "  ============================"
+    ok "Uninstalled"
+    echo ""
+    info "Tailscale state is preserved in $STATE_DIR"
+    info "To remove state too: rm -rf $STATE_DIR"
+    info "To remove this script: rm -f $INSTALL_DIR/tailscaled-proot"
+    echo ""
+}
+
+cmd_help() {
+    echo ""
+    echo "  tailscaled-proot - Patched Tailscale daemon for PRoot-Distro (Termux)"
+    echo ""
+    echo "  A patched build of tailscaled that works in PRoot-Distro on Android"
+    echo "  without root access. Includes SSH server and Taildrop support."
+    echo ""
+    echo "  Usage:"
+    echo "    tailscaled-proot install     Install tailscale + tailscaled and set up auto-start"
+    echo "    tailscaled-proot update      Update to the latest version"
+    echo "    tailscaled-proot status      Show current versions and daemon status"
+    echo "    tailscaled-proot uninstall   Remove tailscale, tailscaled, and auto-start"
+    echo "    tailscaled-proot help        Show this help message"
+    echo ""
+    echo "  Repository: https://github.com/$GITHUB_REPO"
+    echo ""
+}
+
+# --- Main ---
+case "${1:-help}" in
+    install)   cmd_install ;;
+    update)    cmd_update ;;
+    status)    cmd_status ;;
+    uninstall) cmd_uninstall ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        err "Unknown command: $1"
+        cmd_help
+        exit 1
+        ;;
+esac

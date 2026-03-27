@@ -2,14 +2,45 @@
 
 ## What This Repo Is
 
-A patched `tailscaled` daemon that runs inside **PRoot-Distro on Android (Termux)**. The stock Linux binary crashes because Android SDK 30+ blocks netlink sockets. This repo contains the patch, build script, install script, and a pre-built binary.
+A patched `tailscaled` daemon that runs inside **PRoot-Distro on Android (Termux)** without root. The stock Linux binary crashes because Android SDK 30+ blocks netlink sockets. This repo contains:
+- The patch and build scripts to produce patched binaries
+- A user-facing CLI tool (`tailscaled-proot`) for install/update/uninstall
+- GitHub Actions CI that automatically builds for every new Tailscale release
+
+**Public repo**: https://github.com/jefferyb/tailscaled-proot
 
 ## Environment
 
 - **Host**: Android device running Termux with PRoot-Distro (Debian/Ubuntu)
-- **Architecture**: aarch64 / arm64
+- **Architecture**: primarily aarch64/arm64 (also supports amd64, arm)
 - **NOT a normal Linux box**: No real root, no kernel access, no TUN devices, no systemd as PID 1
-- **Headscale**: The user runs a self-hosted Headscale control server, not the official Tailscale coordination server
+- **Headscale**: The maintainer runs a self-hosted Headscale control server, but the project works with official Tailscale too
+
+## Architecture
+
+### For End Users
+
+Users interact only with the `tailscaled-proot` script:
+- `tailscaled-proot install` -- downloads pre-built binaries from GitHub Releases, sets up auto-start
+- `tailscaled-proot update` -- checks for new version, downloads, replaces, restarts
+- `tailscaled-proot status` -- shows versions, daemon status, checks for updates
+- `tailscaled-proot uninstall` -- removes binaries and auto-start
+
+The script downloads **both** `tailscale` (CLI, unmodified) and `tailscaled` (daemon, patched) from our GitHub Releases. No apt package is used -- this avoids the problem of `apt upgrade` overwriting the patched binary.
+
+### For CI / Releases
+
+GitHub Actions watches for new Tailscale releases and:
+1. Clones the Tailscale source at that tag
+2. Applies our patch
+3. Builds `tailscaled` with `GOOS=android` and version-matched ldflags
+4. Downloads the matching official `tailscale` CLI from Tailscale's static releases
+5. Creates a GitHub Release with all binaries attached
+6. If the patch fails to apply, opens an issue
+
+### For Manual/Local Builds
+
+`build-tailscaled.sh` is still available for building locally or debugging patch issues.
 
 ## Critical Knowledge
 
@@ -28,14 +59,15 @@ Even with `GOOS=android`, two problems remain:
 
 ### Version Stamping
 
-The `tailscale` CLI client (installed via apt from Tailscale's official repo) and our custom-built `tailscaled` daemon must report the **same version string**, or every command prints a warning. The build script handles this automatically by reading the installed client's version via `tailscale version` and passing it through `-ldflags`:
+The `tailscale` CLI and our custom-built `tailscaled` must report the **same version string**, or every command prints a warning. The build uses `-ldflags` to stamp the version:
 ```
 -X tailscale.com/version.longStamp=<long> -X tailscale.com/version.shortStamp=<short>
 ```
+Since we distribute both binaries from the same Tailscale release tag, they always match.
 
-### Apt Package Hold
+### No Apt Package
 
-The `tailscale` apt package is held (`apt-mark hold tailscale`) to prevent `apt upgrade` from overwriting our patched `/usr/sbin/tailscaled` with the stock Linux binary. Both `install.sh` and `build-tailscaled.sh --upgrade` manage this automatically. If the package is accidentally unheld and upgraded, the stock binary will crash with the netlink error -- just re-run `./install.sh` or `./build-tailscaled.sh --upgrade`.
+We deliberately **do not use** the official `tailscale` apt package. Our `install` command provides both binaries. This avoids `apt upgrade` overwriting the patched daemon. The `tailscaled-proot` script removes the apt package if it finds one during install.
 
 ### Auto-Start
 
@@ -45,30 +77,22 @@ PRoot-Distro does not support systemd. The daemon auto-starts via a snippet in `
 
 | File | Purpose |
 |------|---------|
-| `tailscaled` | Pre-built patched binary (aarch64, GOOS=android) |
+| `tailscaled-proot` | User-facing CLI tool (install/update/status/uninstall) |
 | `tailscale-proot-distro.patch` | Git patch against tailscale source tree |
-| `build-tailscaled.sh` | Clones tailscale, applies patch, builds with version stamps |
-| `install.sh` | Installs binary, startup script, systemd unit, bashrc auto-start |
+| `build-tailscaled.sh` | Build script for local/CI builds |
+| `install.sh` | Legacy installer (installs from pre-built binary in repo) |
 | `README.md` | User-facing documentation |
+| `LICENSE` | Tailscale's BSD-3-Clause license |
+| `.github/workflows/` | CI workflows for automated builds |
 
 ## Common Tasks
 
-### Upgrade to a New Tailscale Version
+### Adding Support for a New Tailscale Release (when CI handles it)
 
-**Easiest**: `./build-tailscaled.sh --upgrade` handles everything (unhold, apt upgrade, build, install, re-hold, restart).
-
-**Manual steps** (if --upgrade doesn't work or you need more control):
-
-1. `apt-mark unhold tailscale`
-2. `apt update && apt install -y --only-upgrade tailscale`
-3. Check the new version: `tailscale version`
-4. Rebuild: `./build-tailscaled.sh v<NEW_VERSION>` (e.g., `./build-tailscaled.sh v1.98.0`)
-5. If the patch fails to apply, see "Regenerating the Patch" below
-6. Install: `cp tailscaled /usr/sbin/tailscaled`
-7. Re-hold: `apt-mark hold tailscale`
-8. Restart: `pkill tailscaled` -- it auto-restarts on next shell, or run `start-tailscaled &`
-9. Verify: `tailscale status` should have no version warning
-10. Commit the updated `tailscaled` binary and `tailscale-proot-distro.patch` to this repo
+If CI is set up, this happens automatically. If the patch fails, CI opens an issue. Then:
+1. Clone the new version and manually apply the same logical changes
+2. Generate a new patch: `git diff > tailscale-proot-distro.patch`
+3. Commit and push -- CI will retry
 
 ### Regenerating the Patch When It Fails to Apply
 
@@ -98,15 +122,14 @@ All changes follow two patterns:
 - `ssh/tailssh/incubator_linux.go`: Remove `&& !android` from build tag
 - `ssh/tailssh/auditd_linux.go`: Remove `&& !android` from build tag
 
-### Fresh Machine Setup
+### Fresh Machine Setup (for maintainer)
 
 1. Install Termux, then PRoot-Distro (e.g., `proot-distro install debian`)
-2. Inside PRoot: `apt update && apt install -y curl gnupg`
-3. Add Tailscale apt repo (for the CLI only): follow https://tailscale.com/download/linux
-4. `apt install tailscale` -- this gives you the `tailscale` CLI
-5. Clone this repo and run `./install.sh`
-6. Connect: `tailscale up --login-server https://headscale.jefferyb.dev:443 --ssh --hostname galaxy-tab-s9-termux --authkey "YOUR_KEY"`
-7. Exit and re-enter PRoot to verify auto-start works
+2. Inside PRoot: `apt update && apt install -y curl`
+3. Run: `curl -fsSL https://raw.githubusercontent.com/jefferyb/tailscaled-proot/main/tailscaled-proot -o /usr/local/bin/tailscaled-proot && chmod +x /usr/local/bin/tailscaled-proot`
+4. Run: `tailscaled-proot install`
+5. Connect: `tailscale up --login-server https://headscale.jefferyb.dev:443 --ssh --hostname galaxy-tab-s9-termux --authkey "YOUR_KEY"`
+6. Exit and re-enter PRoot to verify auto-start works
 
 ### Go Version
 
@@ -121,9 +144,17 @@ Tailscale's `go.mod` specifies the minimum Go version. As of v1.96.2, it require
 - **"SSH server not supported on android"** = the build tag patches weren't applied. Verify `GOOS=android` was used AND the patch was applied before building.
 - **Stale socket** (`/var/run/tailscale/tailscaled.sock`): If the daemon crashes, the socket file may remain. The auto-start snippet handles this by removing it before launch.
 - **UDP buffer warnings** at daemon startup are cosmetic. They only affect throughput, not functionality.
-- **The `tailscale` CLI binary does NOT need patching** -- only `tailscaled` (the daemon) touches netlink.
-- **`apt upgrade` will break things** if the package isn't held. Always verify with `apt-mark showhold | grep tailscale`. If it's not held, run `apt-mark hold tailscale`.
-- **Binary is ~34MB** and committed to the repo. This is intentional for quick installs without rebuilding.
+- **The `tailscale` CLI binary does NOT need patching** -- only `tailscaled` (the daemon) touches netlink. But we distribute both to keep versions matched.
+- **`apt upgrade` will break things** if the user installed the official `tailscale` apt package. The `tailscaled-proot install` command removes it and provides both binaries itself.
+- **Cross-compilation works fine** since `CGO_ENABLED=0`. CI can build arm64 binaries on x86_64 runners.
+
+## Similar Projects
+
+- [anasfanani/tailscale-android-cli](https://github.com/anasfanani/tailscale-android-cli) -- Full fork approach, SSH enabled, but tends to fall behind upstream
+- [spotsnel/tailscaled-android](https://github.com/spotsnel/tailscaled-android) -- Uses `wlynxg/anet` library, appears stale
+- [Termux root-packages/tailscale](https://github.com/termux/termux-packages/pull/22980) -- Official Termux package, requires root
+
+Our approach (patch-based, not a full fork) is designed to be easier to keep current with upstream.
 
 ## Continuous Improvement
 
