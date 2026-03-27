@@ -180,6 +180,14 @@ jobs:
           echo "==> Official CLI binary:"
           file /tmp/release/tailscale-arm64
 
+      - name: Generate checksums
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          cd /tmp/release
+          sha256sum * > SHA256SUMS
+          echo "==> SHA256SUMS:"
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         if: steps.check.outputs.should_build == 'true'
         run: |
@@ -207,6 +215,7 @@ jobs:
           |------|-------------|
           | \`tailscaled-arm64\` | Patched daemon for aarch64 |
           | \`tailscale-arm64\` | Official Tailscale CLI for aarch64 |
+          | \`SHA256SUMS\` | Checksums for binary verification |
 
           ### Changes from upstream
 

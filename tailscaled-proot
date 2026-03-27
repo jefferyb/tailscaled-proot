@@ -296,6 +296,55 @@ download() {
     fi
 }
 
+# --- Binary verification ---
+verify_checksums() {
+    local dir="$1"
+    local release_json="$2"
+
+    local checksums_url
+    checksums_url=$(get_download_url "$release_json" "SHA256SUMS")
+
+    if [ -z "$checksums_url" ]; then
+        warn "No SHA256SUMS found in release -- skipping verification"
+        return 0
+    fi
+
+    info "Downloading checksums..."
+    if ! curl -fsSL -o "$dir/SHA256SUMS" "$checksums_url" 2>/dev/null; then
+        warn "Could not download SHA256SUMS -- skipping verification"
+        return 0
+    fi
+
+    info "Verifying binary integrity..."
+    local failed=0
+    for bin in tailscale tailscaled; do
+        [ -f "$dir/$bin" ] || continue
+        local expected actual
+        expected=$(grep " ${bin}-arm64$" "$dir/SHA256SUMS" | awk '{print $1}')
+        if [ -z "$expected" ]; then
+            warn "No checksum found for ${bin}-arm64 -- skipping"
+            continue
+        fi
+        actual=$(sha256sum "$dir/$bin" | awk '{print $1}')
+        if [ "$expected" = "$actual" ]; then
+            ok "$bin: checksum verified"
+        else
+            err "$bin: CHECKSUM MISMATCH"
+            err "  expected: $expected"
+            err "  got:      $actual"
+            failed=1
+        fi
+    done
+
+    rm -f "$dir/SHA256SUMS"
+
+    if [ "$failed" -eq 1 ]; then
+        err "Binary verification failed! Downloads may be corrupted or tampered with."
+        err "Aborting installation for your safety."
+        exit 1
+    fi
+}
+
 # --- Commands ---
 
 cmd_install() {
@@ -306,7 +355,7 @@ cmd_install() {
     echo "  tailscaled-proot installer"
     echo "  =========================="
 
-    TOTAL_STEPS=6
+    TOTAL_STEPS=7
     local arch
     arch=$(detect_arch)
 
@@ -348,7 +397,10 @@ cmd_install() {
     info "Downloading tailscaled (daemon)..."
     download "$tailscaled_url" "$tmp/tailscaled"
 
-    step 4 "Installing"
+    step 4 "Verifying downloads"
+    verify_checksums "$tmp" "$release_json"
+
+    step 5 "Installing"
     stop_daemon
     mkdir -p "$INSTALL_DIR"
     cp "$tmp/tailscale" "$INSTALL_DIR/tailscale"
@@ -357,17 +409,16 @@ cmd_install() {
     ok "Installed tailscale to $INSTALL_DIR/tailscale"
     ok "Installed tailscaled to $INSTALL_DIR/tailscaled"
 
-    # Remove the official apt package if installed to avoid conflicts
     if dpkg -l tailscale 2>/dev/null | grep -q '^ii'; then
         info "Removing conflicting apt package 'tailscale'..."
         apt-get remove -y tailscale &>/dev/null || true
         ok "Apt package removed (our binaries in $INSTALL_DIR take precedence)"
     fi
 
-    step 5 "Configuring auto-start"
+    step 6 "Configuring auto-start"
     install_autostart
 
-    step 6 "Starting daemon"
+    step 7 "Starting daemon"
     start_daemon
 
     echo ""
@@ -398,7 +449,7 @@ cmd_update() {
     echo "  tailscaled-proot updater"
     echo "  ========================"
 
-    TOTAL_STEPS=6
+    TOTAL_STEPS=7
 
     if [ ! -x "$INSTALL_DIR/tailscaled" ]; then
         err "tailscaled-proot is not installed. Run: tailscaled-proot install"
@@ -461,14 +512,17 @@ cmd_update() {
     info "Downloading tailscaled (daemon)..."
     download "$tailscaled_url" "$tmp/tailscaled"
 
-    step 5 "Installing"
+    step 5 "Verifying downloads"
+    verify_checksums "$tmp" "$release_json"
+
+    step 6 "Installing"
     stop_daemon
     cp "$tmp/tailscale" "$INSTALL_DIR/tailscale"
     cp "$tmp/tailscaled" "$INSTALL_DIR/tailscaled"
     chmod +x "$INSTALL_DIR/tailscale" "$INSTALL_DIR/tailscaled"
     ok "Binaries updated"
 
-    step 6 "Restarting daemon"
+    step 7 "Restarting daemon"
     start_daemon
 
     echo ""
