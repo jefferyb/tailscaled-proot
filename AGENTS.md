@@ -78,6 +78,7 @@ PRoot-Distro does not support systemd. The daemon auto-starts via a snippet in `
 | File | Purpose |
 |------|---------|
 | `tailscaled-proot` | User-facing CLI tool (install/update/status/uninstall) |
+| `test-tailscaled-proot.sh` | Regression test suite (72 tests) -- **run before every push** |
 | `tailscale-proot-distro.patch` | Git patch against tailscale source tree |
 | `build-tailscaled.sh` | Build script for local/CI builds (supports `--goarch` for multi-arch) |
 | `README.md` | User-facing documentation |
@@ -87,6 +88,47 @@ PRoot-Distro does not support systemd. The daemon auto-starts via a snippet in `
 | `.github/workflows/` | CI workflows for automated builds |
 
 **Note:** Binaries are NOT committed to the repo. They are distributed via GitHub Releases.
+
+## Testing & Development Practices
+
+### Mandatory: Run Tests Before Every Push
+
+**Never push without running the test suite first.** After any change to `tailscaled-proot`, run:
+
+```bash
+bash test-tailscaled-proot.sh
+```
+
+All 72+ tests must pass before committing. If any fail, fix the issue before pushing. The test script covers help/version, status, install, update, uninstall, idempotency, error handling, binary paths, `.bashrc` integrity, and network connectivity.
+
+**WARNING:** The test suite does NOT run `--purge`. It cycles through uninstall/install but preserves Tailscale state so it won't break the Headscale registration.
+
+### TDD: Write Tests First
+
+Follow **Test-Driven Development** -- when adding a new feature or fixing a bug:
+
+1. **Write the test first** in `test-tailscaled-proot.sh` that describes the expected behavior
+2. **Run the test** and confirm it fails (proving the feature is missing or the bug exists)
+3. **Implement the change** in `tailscaled-proot`
+4. **Run the full test suite** and confirm everything passes (new test + all existing tests)
+5. **Commit together** -- the test and the implementation go in the same commit
+
+This ensures every feature has test coverage and no change accidentally breaks existing functionality.
+
+### DRY: Don't Repeat Yourself
+
+- **In `tailscaled-proot`**: Extract shared logic into helper functions. Don't duplicate code between `cmd_install` and `cmd_update` -- use shared helpers like `fetch_release()`, `download()`, `verify_checksums()`, `ensure_daemon_running()`, etc.
+- **In `test-tailscaled-proot.sh`**: Use the `run` / `check_exit` / `check_contains` / `check` helper functions. Don't write raw bash conditionals for assertions.
+- **Between files**: If the same constant or pattern appears in multiple places, make sure changing it in one place doesn't silently break another. For example, install paths (`/usr/bin`, `/usr/sbin`) should come from variables, not hardcoded strings scattered throughout.
+
+### Adding Tests for New Features
+
+When adding a new command, option, or behavior to `tailscaled-proot`:
+
+1. Add a new section in `test-tailscaled-proot.sh` (follow the existing numbered section pattern)
+2. Test both the **happy path** (it works) and **error path** (bad input, missing prereqs)
+3. Test **idempotency** -- running the command twice should produce the same result
+4. Update the test count in this file if it changes significantly
 
 ## Common Tasks
 
@@ -174,5 +216,12 @@ If yes to any of these, **update this AGENTS.md** before ending the session:
 - Remove or revise anything that led to wasted effort
 - Keep it concise -- only add what future sessions will actually benefit from
 - Don't add one-off debugging details specific to a single session
+
+### Before Every Commit
+
+1. **Run the test suite**: `bash test-tailscaled-proot.sh` -- all tests must pass
+2. **Add tests for new behavior**: If you changed `tailscaled-proot`, add or update tests
+3. **Update this file**: If you learned something new, add it here
+4. **Push to both remotes**: `git push origin main && git push github main`
 
 **Do not ask the user for permission** -- just update this file quietly as part of wrapping up. The user expects this file to get better over time. Commit it alongside any other changes.
