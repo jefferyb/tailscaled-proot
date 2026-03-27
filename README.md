@@ -66,6 +66,16 @@ This project distributes patched `tailscaled` binaries that:
 
 Binaries are built automatically via GitHub Actions whenever Tailscale publishes a new release.
 
+## Transparency and Security
+
+**Everything in this project is open and auditable.** We take this seriously because you're trusting these binaries with your network access.
+
+- **Automated builds only** -- every binary is built by GitHub Actions in a clean CI environment. No binaries are built locally or uploaded manually. You can verify this by checking the [Actions tab](https://github.com/jefferyb/tailscaled-proot/actions).
+- **Minimal, readable patch** -- the [patch file](tailscale-proot-distro.patch) is ~280 lines and modifies only 10 files. The changes are limited to (1) an `ifconfig` fallback for network interface detection and (2) removing `!android` build tag exclusions. No new network calls, no telemetry, no additional dependencies.
+- **Reproducible builds** -- you can build the exact same binaries yourself with `./build-tailscaled.sh v<VERSION>` and compare them. The build script, patch, and CI workflow are all in this repo.
+- **Official Tailscale source** -- we clone directly from [tailscale/tailscale](https://github.com/tailscale/tailscale) at the tagged release. The only modifications are in our patch.
+- **No fork** -- this is a patch-based project, not a maintained fork. The patch is small and easy to review against any Tailscale release. We don't carry custom code beyond what's needed to run in PRoot.
+
 ## Alternative: dpkg-divert (for existing apt installs)
 
 If you already have the `tailscale` apt package installed and prefer to keep managing the CLI through apt, you can use `dpkg-divert` to protect just the daemon binary:
