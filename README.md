@@ -49,8 +49,10 @@ Checks GitHub for the latest release, downloads matching binaries, and restarts 
 
 | Command | Description |
 |---------|-------------|
-| `tailscaled-proot install` | Download and install both binaries, configure auto-start, start daemon |
-| `tailscaled-proot update` | Update to the latest version |
+| `tailscaled-proot install` | Download and install latest, configure auto-start, start daemon |
+| `tailscaled-proot install v1.96.2` | Install a specific version |
+| `tailscaled-proot update` | Update to the latest version (script + binaries) |
+| `tailscaled-proot update v1.94.0` | Switch to a specific version |
 | `tailscaled-proot status` | Show versions, daemon status, and check for updates |
 | `tailscaled-proot uninstall` | Remove binaries and auto-start (preserves Tailscale state) |
 | `tailscaled-proot help` | Show help |
