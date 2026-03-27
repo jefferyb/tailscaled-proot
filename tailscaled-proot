@@ -166,21 +166,18 @@ get_download_url() {
 }
 
 # --- Version helpers ---
-installed_cli_version() {
-    if [ -x "$CLI_DIR/tailscale" ]; then
-        "$CLI_DIR/tailscale" version 2>/dev/null | head -1
+installed_version() {
+    local bin="$1"
+    local flag="${2:---version}"
+    if [ -x "$bin" ]; then
+        "$bin" $flag 2>/dev/null | head -1
     else
         echo "not installed"
     fi
 }
 
-installed_daemon_version() {
-    if [ -x "$DAEMON_DIR/tailscaled" ]; then
-        "$DAEMON_DIR/tailscaled" --version 2>/dev/null | head -1
-    else
-        echo "not installed"
-    fi
-}
+installed_cli_version()    { installed_version "$CLI_DIR/tailscale" "version"; }
+installed_daemon_version() { installed_version "$DAEMON_DIR/tailscaled" "--version"; }
 
 # --- Daemon management ---
 stop_daemon() {
@@ -265,23 +262,23 @@ install_autostart() {
     if [ -f "$BASHRC" ] && [ -s "$BASHRC" ] && [ -n "$(tail -c1 "$BASHRC")" ]; then
         echo "" >> "$BASHRC"
     fi
-    cat >> "$BASHRC" << 'SNIPPET'
-# --- tailscaled-proot auto-start ---
+    cat >> "$BASHRC" << SNIPPET
+$BASHRC_MARKER
 if command -v tailscaled &>/dev/null && ! pgrep tailscaled &>/dev/null; then
-    mkdir -p /var/run/tailscale /var/lib/tailscale
-    rm -f /var/run/tailscale/tailscaled.sock
-    tailscaled \
-        --state=/var/lib/tailscale/tailscaled.state \
-        --socket=/var/run/tailscale/tailscaled.sock \
-        --tun=userspace-networking \
+    mkdir -p $SOCKET_DIR $STATE_DIR
+    rm -f $SOCKET
+    tailscaled \\
+        --state=$STATE_DIR/tailscaled.state \\
+        --socket=$SOCKET \\
+        --tun=userspace-networking \\
         --port=41641 &>/dev/null &
-    disown $!
+    disown \$!
     for _ in 1 2 3 4 5; do
-        [ -S /var/run/tailscale/tailscaled.sock ] && break
+        [ -S $SOCKET ] && break
         sleep 1
     done
 fi
-# --- end tailscaled-proot ---
+$BASHRC_END_MARKER
 SNIPPET
     ok "Auto-start configured"
 }
@@ -303,6 +300,15 @@ remove_autostart() {
         ok "No auto-start found in ~/.bashrc"
     fi
     remove_legacy_autostart
+}
+
+# --- Apt conflict removal ---
+remove_apt_tailscale() {
+    if dpkg -l tailscale 2>/dev/null | grep -q '^ii'; then
+        info "Removing conflicting apt package 'tailscale'..."
+        apt-get remove -y tailscale &>/dev/null || true
+        ok "Apt package removed"
+    fi
 }
 
 # --- Detect architecture ---
@@ -389,6 +395,42 @@ verify_checksums() {
     fi
 }
 
+# --- Shared install pipeline ---
+resolve_release() {
+    local target_version="$1"
+    RELEASE_JSON=$(fetch_release "$target_version")
+    RELEASE_TAG=$(get_latest_tag "$RELEASE_JSON")
+    RELEASE_VER="${RELEASE_TAG#v}"
+}
+
+download_binaries() {
+    local arch="$1"
+    local tailscale_url tailscaled_url
+    tailscale_url=$(get_download_url "$RELEASE_JSON" "tailscale-${arch}")
+    tailscaled_url=$(get_download_url "$RELEASE_JSON" "tailscaled-${arch}")
+
+    if [ -z "$tailscale_url" ] || [ -z "$tailscaled_url" ]; then
+        err "Could not find binaries for architecture '$arch' in release $RELEASE_TAG"
+        exit 1
+    fi
+
+    _TMPDIR=$(mktemp -d)
+
+    info "Downloading tailscale (CLI)..."
+    download "$tailscale_url" "$_TMPDIR/tailscale"
+
+    info "Downloading tailscaled (daemon)..."
+    download "$tailscaled_url" "$_TMPDIR/tailscaled"
+}
+
+install_downloaded_binaries() {
+    stop_daemon
+    mkdir -p "$CLI_DIR" "$DAEMON_DIR"
+    cp "$_TMPDIR/tailscale" "$CLI_DIR/tailscale"
+    cp "$_TMPDIR/tailscaled" "$DAEMON_DIR/tailscaled"
+    chmod +x "$CLI_DIR/tailscale" "$DAEMON_DIR/tailscaled"
+}
+
 # --- Commands ---
 
 cmd_install() {
@@ -409,27 +451,20 @@ cmd_install() {
     info "Daemon path:  $DAEMON_DIR/tailscaled"
 
     step 2 "Fetching release"
-    local release_json latest_tag
-    release_json=$(fetch_release "$target_version")
-    latest_tag=$(get_latest_tag "$release_json")
-    local latest_ver="${latest_tag#v}"
+    resolve_release "$target_version"
     if [ -n "$target_version" ]; then
-        ok "Requested release: $latest_tag"
+        ok "Requested release: $RELEASE_TAG"
     else
-        ok "Latest release: $latest_tag"
+        ok "Latest release: $RELEASE_TAG"
     fi
 
     local current_ver
     current_ver=$(installed_daemon_version)
-    if [ "$current_ver" = "$latest_ver" ]; then
+    if [ "$current_ver" = "$RELEASE_VER" ]; then
         ok "Already installed: $current_ver"
 
         step 3 "Ensuring configuration"
-        if dpkg -l tailscale 2>/dev/null | grep -q '^ii'; then
-            info "Removing conflicting apt package 'tailscale'..."
-            apt-get remove -y tailscale &>/dev/null || true
-            ok "Apt package removed"
-        fi
+        remove_apt_tailscale
         install_autostart
         ensure_daemon_running
 
@@ -441,44 +476,20 @@ cmd_install() {
     fi
 
     if [ "$current_ver" != "not installed" ]; then
-        info "Existing installation: $current_ver → $latest_ver"
-    fi
-
-    local tailscale_url tailscaled_url
-    tailscale_url=$(get_download_url "$release_json" "tailscale-${arch}")
-    tailscaled_url=$(get_download_url "$release_json" "tailscaled-${arch}")
-
-    if [ -z "$tailscale_url" ] || [ -z "$tailscaled_url" ]; then
-        err "Could not find binaries for architecture '$arch' in release $latest_tag"
-        exit 1
+        info "Existing installation: $current_ver → $RELEASE_VER"
     fi
 
     step 3 "Downloading binaries"
-    _TMPDIR=$(mktemp -d)
-
-    info "Downloading tailscale (CLI)..."
-    download "$tailscale_url" "$_TMPDIR/tailscale"
-
-    info "Downloading tailscaled (daemon)..."
-    download "$tailscaled_url" "$_TMPDIR/tailscaled"
+    download_binaries "$arch"
 
     step 4 "Verifying downloads"
-    verify_checksums "$_TMPDIR" "$release_json"
+    verify_checksums "$_TMPDIR" "$RELEASE_JSON"
 
     step 5 "Installing"
-    stop_daemon
-    mkdir -p "$CLI_DIR" "$DAEMON_DIR"
-    cp "$_TMPDIR/tailscale" "$CLI_DIR/tailscale"
-    cp "$_TMPDIR/tailscaled" "$DAEMON_DIR/tailscaled"
-    chmod +x "$CLI_DIR/tailscale" "$DAEMON_DIR/tailscaled"
+    install_downloaded_binaries
     ok "Installed $CLI_DIR/tailscale"
     ok "Installed $DAEMON_DIR/tailscaled"
-
-    if dpkg -l tailscale 2>/dev/null | grep -q '^ii'; then
-        info "Removing conflicting apt package 'tailscale'..."
-        apt-get remove -y tailscale &>/dev/null || true
-        ok "Apt package removed"
-    fi
+    remove_apt_tailscale
 
     step 6 "Configuring auto-start"
     install_autostart
@@ -533,56 +544,35 @@ cmd_update() {
     info "Installed: $current"
 
     step 3 "Fetching release"
-    local release_json latest_tag
-    release_json=$(fetch_release "$target_version")
-    latest_tag=$(get_latest_tag "$release_json")
-    local latest_ver="${latest_tag#v}"
+    resolve_release "$target_version"
 
     if [ -n "$target_version" ]; then
-        ok "Requested: $latest_tag"
+        ok "Requested: $RELEASE_TAG"
     else
-        ok "Latest: $latest_tag"
+        ok "Latest: $RELEASE_TAG"
     fi
 
-    if [ -z "$target_version" ] && [ "$current" = "$latest_ver" ]; then
+    if [ -z "$target_version" ] && [ "$current" = "$RELEASE_VER" ]; then
         echo ""
         ok "Already up to date! ($current)"
         echo ""
         return
     fi
 
-    if [ "$current" = "$latest_ver" ]; then
-        info "Reinstalling $latest_ver"
+    if [ "$current" = "$RELEASE_VER" ]; then
+        info "Reinstalling $RELEASE_VER"
     else
-        info "Update: $current → $latest_ver"
-    fi
-
-    local tailscale_url tailscaled_url
-    tailscale_url=$(get_download_url "$release_json" "tailscale-${arch}")
-    tailscaled_url=$(get_download_url "$release_json" "tailscaled-${arch}")
-
-    if [ -z "$tailscale_url" ] || [ -z "$tailscaled_url" ]; then
-        err "Could not find binaries for architecture '$arch' in release $latest_tag"
-        exit 1
+        info "Update: $current → $RELEASE_VER"
     fi
 
     step 4 "Downloading binaries"
-    _TMPDIR=$(mktemp -d)
-
-    info "Downloading tailscale (CLI)..."
-    download "$tailscale_url" "$_TMPDIR/tailscale"
-
-    info "Downloading tailscaled (daemon)..."
-    download "$tailscaled_url" "$_TMPDIR/tailscaled"
+    download_binaries "$arch"
 
     step 5 "Verifying downloads"
-    verify_checksums "$_TMPDIR" "$release_json"
+    verify_checksums "$_TMPDIR" "$RELEASE_JSON"
 
     step 6 "Installing"
-    stop_daemon
-    cp "$_TMPDIR/tailscale" "$CLI_DIR/tailscale"
-    cp "$_TMPDIR/tailscaled" "$DAEMON_DIR/tailscaled"
-    chmod +x "$CLI_DIR/tailscale" "$DAEMON_DIR/tailscaled"
+    install_downloaded_binaries
     ok "Binaries updated"
 
     step 7 "Restarting daemon"

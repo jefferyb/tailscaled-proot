@@ -19,6 +19,11 @@ PASS=0
 FAIL=0
 TESTS=()
 
+CLI_BIN="/usr/bin/tailscale"
+DAEMON_BIN="/usr/sbin/tailscaled"
+SCRIPT_BIN="/usr/local/bin/tailscaled-proot"
+LEGACY_DIR="/usr/local/bin"
+
 red()   { echo -e "\033[1;31m$*\033[0m"; }
 green() { echo -e "\033[1;32m$*\033[0m"; }
 bold()  { echo -e "\033[1m$*\033[0m"; }
@@ -135,8 +140,8 @@ check_exit "uninstall exits 0" 0
 check_contains "uninstall says Uninstalled" "Uninstalled"
 check_contains "uninstall preserves config msg" "Config and state preserved"
 check "daemon stopped after uninstall" test "$(count_daemons)" -eq 0
-check "CLI binary removed" test ! -f /usr/bin/tailscale
-check "daemon binary removed" test ! -f /usr/sbin/tailscaled
+check "CLI binary removed" test ! -f "$CLI_BIN"
+check "daemon binary removed" test ! -f "$DAEMON_BIN"
 check "state dir preserved" test -d /var/lib/tailscale
 
 echo ""
@@ -174,8 +179,8 @@ check_exit "install exits 0" 0
 check_contains "checksum verification ran" "checksum verified"
 check_contains "install shows PID" "PID [0-9]"
 check "daemon running after install" daemon_running
-check "CLI binary installed" test -x /usr/bin/tailscale
-check "daemon binary installed" test -x /usr/sbin/tailscaled
+check "CLI binary installed" test -x "$CLI_BIN"
+check "daemon binary installed" test -x "$DAEMON_BIN"
 check "socket exists" test -S /var/run/tailscale/tailscaled.sock
 check "exactly 1 daemon process" test "$(count_daemons)" -eq 1
 check "bashrc markers unchanged" test "$(bashrc_marker_count)" -eq "$INITIAL_MARKERS"
@@ -250,14 +255,14 @@ echo ""
 bold "[Section 12] Binary paths and versions"
 # ------------------------------------------------------------------
 
-check "CLI at /usr/bin" test -x /usr/bin/tailscale
-check "daemon at /usr/sbin" test -x /usr/sbin/tailscaled
-check "script at /usr/local/bin" test -x /usr/local/bin/tailscaled-proot
-check "no stale CLI at /usr/local/bin" test ! -f /usr/local/bin/tailscale
-check "no stale daemon at /usr/local/bin" test ! -f /usr/local/bin/tailscaled
+check "CLI at expected path" test -x "$CLI_BIN"
+check "daemon at expected path" test -x "$DAEMON_BIN"
+check "script at expected path" test -x "$SCRIPT_BIN"
+check "no stale CLI at legacy path" test ! -f "$LEGACY_DIR/tailscale"
+check "no stale daemon at legacy path" test ! -f "$LEGACY_DIR/tailscaled"
 
-CLI_VER=$(/usr/bin/tailscale version 2>/dev/null | head -1)
-DAEMON_VER=$(/usr/sbin/tailscaled --version 2>/dev/null | head -1)
+CLI_VER=$("$CLI_BIN" version 2>/dev/null | head -1)
+DAEMON_VER=$("$DAEMON_BIN" --version 2>/dev/null | head -1)
 check "CLI and daemon versions match" test "$CLI_VER" = "$DAEMON_VER"
 
 echo ""
@@ -281,11 +286,11 @@ bold "[Section 14] Network connectivity"
 
 # Give daemon time to reconnect after section 10's reinstall
 for _ in 1 2 3 4 5; do
-    /usr/bin/tailscale status &>/dev/null && break
+    "$CLI_BIN" status &>/dev/null && break
     sleep 2
 done
 
-run /usr/bin/tailscale status
+run "$CLI_BIN" status
 check_exit "tailscale status exits 0" 0
 check_contains "tailscale sees peers" "100\.64\."
 
